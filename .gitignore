@@ -1,0 +1,5 @@
+__pycache__
+# What Wisp and the plugin write beside the plugin in a Hermes home.
+zone.json
+pin.json
+moved.json

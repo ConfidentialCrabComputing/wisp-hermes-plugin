@@ -1,0 +1,4 @@
+name: wisp
+version: "0.1.0"
+description: "Wisp, a private agent beside Hermes: hands the tasks that need Wisp's services or Private Folders to Wisp's ask_wisp, and `hermes wisp connect <url>` registers Wisp's MCP endpoint."
+author: "Wisp"

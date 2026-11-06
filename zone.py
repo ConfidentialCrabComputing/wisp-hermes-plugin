@@ -1,0 +1,156 @@
+"""Wisp's zone and services, as `wisp_zone` answers them at Hermes's start, and the routing rule built
+from them."""
+
+import json
+import logging
+import os
+import re
+from pathlib import Path
+
+from .mcp_client import McpError, call_tool
+
+logger = logging.getLogger(__name__)
+
+# Beside the plugin. Hermes's model can write it (`plugins/` is not among Hermes's protected paths), so
+# everything read from it is data: shape-checked by its use, and made inert before it enters the rule.
+ZONE_CACHE = Path(__file__).resolve().parent / "zone.json"
+# Beside the plugin too, written only by `wisp integrate hermes` from outside Hermes: the Runtime's loopback
+# URL and Wisp's zone as they were then. Write-denied under the sandbox, unlike `config.yaml`'s URL.
+PIN = Path(__file__).resolve().parent / "pin.json"
+# Hermes drops a longer system prompt section whole (`plugins_dispatch.MAX_SYSTEM_PROMPT_SECTION_CHARS`).
+SECTION_CAP = 4000
+# Two limits on an answer's folders, for time only, as no real zone nears them: a list that fails costs a probe per
+# folder, at about 57 ms each, and past 2 MB of paths (Linux's usual `ARG_MAX`) every probe of it fails with `E2BIG`. What
+# keeps the pinned folders closed is `pinned_zone` and `protect`'s fallback, not these. `ZONE_BYTES`, Linux's limit on one
+# argument, says nothing of how many folders fit: `ZONE_FOLDERS` does.
+ZONE_FOLDERS = 500
+ZONE_BYTES = 128 * 1024
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+
+
+def _cache(zone, cache):
+    try:
+        cache.write_text(json.dumps(zone))
+    except OSError as exc:
+        logger.warning("Wisp: could not cache the zone at %s: %s", cache, exc)
+
+
+def load_zone(url, credential, cache):
+    """With no pin: the zone from the endpoint at `url`, written to `cache` as it came, as it may name another
+    machine's folders; the cached one when the endpoint cannot answer; None when there is neither."""
+    if url and credential:
+        try:
+            zone = call_tool(url, credential, "wisp_zone")["structuredContent"]
+            _cache(zone, cache)
+            return zone
+        except (OSError, McpError, ValueError, KeyError) as exc:
+            logger.warning("Wisp: wisp_zone failed (%s); using the cached zone", exc)
+    try:
+        return json.loads(cache.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def load_pin(path):
+    """What `wisp integrate hermes` pinned, the zone's shape plus `url`; None without a pin (a second
+    machine's `hermes wisp connect` writes none)."""
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+
+
+def _folders(zone):
+    return [zone["dataDir"], zone["deskRoot"], *(folder["path"] for folder in zone.get("privateFolders") or [])]
+
+
+def _well_formed(path):
+    """An absolute string the kernel can take as a path: a NUL byte or a lone surrogate raises where it is used (strictly
+    encoded, as macOS's profile needs and Linux's nested re-exec, through a Node that must decode it the same)."""
+    try:
+        return isinstance(path, str) and os.path.isabs(path) and b"\0" not in path.encode()
+    except ValueError:
+        return False
+
+
+def _answered_folders(answer):
+    """The folders of `answer`, the whole of it checked; raises when it cannot widen a pinned zone."""
+    folders = _folders(answer)
+    if len(folders) > ZONE_FOLDERS:
+        raise ValueError(f"past {ZONE_FOLDERS} folders")
+    if bad := [path for path in folders if not _well_formed(path)]:
+        raise ValueError(f"not a folder: {bad[0]!r}"[:200])
+    if sum(map(len, map(os.fsencode, folders))) > ZONE_BYTES:
+        raise ValueError(f"its folders are past {ZONE_BYTES} bytes")
+    return folders
+
+
+def widen(pin, answer):
+    """The pinned zone with whatever `answer`, if any, adds to it: an answer widens the zone, never narrows it."""
+    pinned = _folders(pin)
+    answered = [] if answer is None else _answered_folders(answer)
+    added = [path for path in dict.fromkeys(answered) if path not in pinned]
+    return {"dataDir": pin["dataDir"], "deskRoot": pin["deskRoot"],
+            "privateFolders": [*pin["privateFolders"], *({"path": path} for path in added)],
+            "services": (answer or {}).get("services") or []}
+
+
+def pinned_zone(pin, credential, cache):
+    """The pinned zone, widened by the endpoint's answer, or else by the cached one. Everything read beyond the pin is
+    data: a failure of any kind means no answer, and only a well-formed answer is cached. Only a pin of the wrong shape raises."""
+    def answered():
+        token = credential()
+        if not token:
+            raise ValueError("no credential")
+        answer = call_tool(pin["url"], token, "wisp_zone")["structuredContent"]
+        if answer is None:
+            raise ValueError("it answered null")
+        zone = widen(pin, answer)
+        _cache(answer, cache)
+        return zone
+
+    def cached():
+        return widen(pin, json.loads(cache.read_text()))
+
+    for read in (answered, cached):
+        try:
+            return read()
+        except Exception as exc:  # noqa: BLE001 — a process on the pinned port, or in the cache, can make any of them
+            logger.warning("Wisp: no zone %s (%r)", read.__name__, exc)
+    return widen(pin, None)
+
+
+def _inert(text):
+    """One line: a newline or other control character in a path or a name could open a rule of its own."""
+    return _CONTROL.sub(" ", str(text))
+
+
+def routing_rule(zone):
+    """The system prompt section that sends Wisp's tasks to `ask_wisp`, within Hermes's section cap: what
+    does not fit is counted, not listed."""
+    head = f"""# Wisp
+Wisp is the user's private agent. It holds the keys to the user's sensitive accounts and reads their
+private files; you cannot reach them. Hand these tasks to the `ask_wisp` tool instead of doing them
+yourself, and relay Wisp's answer; continue a Wisp conversation by passing its `conversation` id back to
+`ask_wisp`:
+- anything that reads or changes a file in Wisp's data directory {_inert(zone["dataDir"])} or under its
+Desk root {_inert(zone["deskRoot"])};"""
+    services = [_inert(service) for service in zone.get("services") or []]
+    folders = [f"- {_inert(folder['path'])}" for folder in zone.get("privateFolders") or []]
+    # ponytail: rebuilds the rule per dropped item, O(n²) in the zone's size; fine for hundreds of entries.
+    for shown in range(len(services) + len(folders), -1, -1):
+        listed_services = services[:shown]
+        listed_folders = folders[:max(0, shown - len(services))]
+        rule = "\n".join([
+            head,
+            f"- anything that needs Wisp's services: {', '.join(listed_services) or ('none yet' if not services else '…')};",
+            "- anything that reads or changes a file in Wisp's Private Folders:",
+            *(listed_folders or ["- none yet" if not folders else "- …"]),
+        ])
+        hidden = len(services) + len(folders) - shown
+        if hidden:
+            rule += f"\nand {hidden} more; ask Wisp."
+        if len(rule) <= SECTION_CAP:
+            return rule
+    # Only a data directory or Desk root past the cap on its own gets here.
+    return rule[:SECTION_CAP]

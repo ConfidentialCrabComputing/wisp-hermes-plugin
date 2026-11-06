@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""A fake `hermes` for the Wisp plugin's tests: records its argv in `$HERMES_HOME/argv.log` (one JSON
+list per line), applies `config set|unset` to `config.yaml` (JSON, as Hermes would: a JSON value parsed,
+emptied sections dropped), and runs a plugin CLI command as Hermes does: the plugin's `register(ctx)`,
+then its argparse tree. For `wisp integrate hermes` also `--version` (`FAKE_HERMES_VERSION`), `profile list`,
+`-p <profile>` (as Hermes: `$HERMES_HOME` re-homed to the profile, children inherit it; without `-p` a root
+home moves to `active_profile`), `config path|env-path`, `config get <key> --json` (for `wisp doctor`)
+and `plugins enable|remove`; `FAKE_HERMES_READ` makes it a rewritten Hermes that fails when it can read
+that file, `FAKE_HERMES_TAMPER` one that rewrites, where it can, the pin of every profile's plugin on
+every call, `FAKE_HERMES_CONFIG_PATH`/`FAKE_HERMES_ENV_PATH` one whose `config path`/`config env-path`
+names that file, and
+`FAKE_HERMES_REMOVE_FAILS` one whose `plugins remove` writes into the plugin and exits non-zero,
+`FAKE_HERMES_FAILS` (an argv joined by spaces) one that exits non-zero on that command. `hermes slash <name> [args]` (not Hermes's) runs a plugin slash command's handler
+and prints what it returns; its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
+answered, in order, from `$HERMES_HOME/tools.json` ({tool: [handler result, ...]}), as Hermes's registry
+would answer them (a JSON string)."""
+
+import argparse
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import sys
+from pathlib import Path
+
+ARGV = sys.argv[1:]
+# The root is the default profile's home; named profiles live under `profiles/`. As Hermes's sticky
+# profile (`hermes_cli/main.py`): `$HERMES_HOME` is trusted only when its parent is `profiles`; a root home
+# and no `-p` moves to the profile `$root/active_profile` names (`hermes profile use`).
+_home = Path(os.environ["HERMES_HOME"])
+_root = _home.parent.parent if _home.parent.name == "profiles" else _home
+_name = None
+if ARGV[:1] in (["-p"], ["--profile"]):
+    _name, ARGV = ARGV[1], ARGV[2:]
+elif _home == _root and (_root / "active_profile").exists():
+    _name = (_root / "active_profile").read_text().strip() or None
+if _name:
+    os.environ["HERMES_HOME"] = str(_root if _name == "default" else _root / "profiles" / _name)
+HOME = Path(os.environ["HERMES_HOME"])
+# Where `hermes plugins install` (or `wisp integrate hermes`) lays the plugin out.
+PLUGIN = HOME / "plugins" / "wisp"
+CONFIG = HOME / "config.yaml"
+
+
+def config():
+    try:
+        return json.loads(CONFIG.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def config_set(key, raw):
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    cfg = config()
+    node = cfg
+    *parents, leaf = key.split(".")
+    for part in parents:
+        node = node.setdefault(part, {})
+    node[leaf] = value
+    CONFIG.write_text(json.dumps(cfg))
+
+
+def config_unset(key):
+    cfg = config()
+    path = [cfg]
+    *parents, leaf = key.split(".")
+    for part in parents:
+        if not isinstance(path[-1].get(part), dict):
+            sys.exit(f"Config key not set: {key}")
+        path.append(path[-1][part])
+    if leaf not in path[-1]:
+        sys.exit(f"Config key not set: {key}")
+    del path[-1][leaf]
+    for parent, part in reversed(list(zip(path, parents))):
+        if parent[part] == {}:
+            del parent[part]
+    CONFIG.write_text(json.dumps(cfg))
+
+
+def config_get(key):
+    # As Hermes's `get_config_value`: the value as JSON, or exit 1 naming the key.
+    node = config()
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            print(f"Config key not set: {key}", file=sys.stderr)
+            sys.exit(1)
+        node = node[part]
+    print(json.dumps(node))
+
+
+class Ctx:
+    def __init__(self):
+        self.cli_commands = {}
+        self.commands = {}
+        self.sections = {}
+        self.hooks = {}
+
+    def register_cli_command(self, name, help, setup_fn, handler_fn=None, description=""):
+        self.cli_commands[name] = (help, setup_fn, handler_fn)
+
+    def register_system_prompt_section(self, id, content, **_):
+        self.sections[id] = content
+
+    def register_command(self, name, handler, description="", args_hint="", argument_mode=None):
+        self.commands[name] = handler
+
+    def dispatch_tool(self, tool_name, args, **kwargs):
+        with open(HOME / "tools.log", "a") as log:
+            log.write(json.dumps([tool_name, args]) + "\n")
+        answers = json.loads((HOME / "tools.json").read_text())
+        answer = answers[tool_name].pop(0)
+        (HOME / "tools.json").write_text(json.dumps(answers))
+        return json.dumps(answer)
+
+    def register_hook(self, hook_name, callback, *, hold_stream=False):
+        self.hooks.setdefault(hook_name, []).append(callback)
+
+
+def pre_tool_call(ctx, tool_name, args):
+    """The first `block` message the plugin's `pre_tool_call` hooks return, as Hermes resolves it
+    (`plugins._get_pre_tool_call_directive_details`); None when the call proceeds. A hook that raises
+    blocks: Hermes fails closed."""
+    for callback in ctx.hooks.get("pre_tool_call", []):
+        try:
+            result = callback(tool_name=tool_name, args=args, task_id="", session_id="", tool_call_id="",
+                              turn_id="", api_request_id="", middleware_trace=[])
+        except Exception as exc:  # noqa: BLE001
+            return f"hook raised: {exc!r}"
+        if isinstance(result, dict) and result.get("action") == "block" and result.get("message"):
+            return result["message"]
+    return None
+
+
+def load_plugin():
+    ctx = Ctx()
+    # Hermes loads a user plugin only when `plugins.enabled` lists it (`plugins_discovery.gate_manifest`).
+    if "wisp" not in ((config().get("plugins") or {}).get("enabled") or []):
+        return ctx
+    spec = importlib.util.spec_from_file_location(
+        "hermes_plugins_wisp", PLUGIN / "__init__.py", submodule_search_locations=[str(PLUGIN)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    module.register(ctx)
+    return ctx
+
+
+def plugin_command(argv):
+    ctx = load_plugin()
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers()
+    for name, (help_text, setup_fn, handler_fn) in ctx.cli_commands.items():
+        command = sub.add_parser(name, help=help_text)
+        setup_fn(command)
+        command.set_defaults(func=handler_fn)
+    args = parser.parse_args(argv)
+    args.func(args)
+
+
+def profile_list():
+    # As Hermes's table: a marker, the label, then columns this fake leaves empty.
+    print(f"\n {'Profile':<16} {'Model':<28} {'Gateway':<12} {'Alias':<12} {'Distribution'}")
+    print(f" {'─' * 15}    {'─' * 27}    {'─' * 11}    {'─' * 11}    {'─' * 20}")
+    # Every profile of the root, whichever one this Hermes runs in.
+    names = ["default"] + sorted(p.name for p in (_root / "profiles").glob("*") if p.is_dir())
+    for name in names:
+        # A display name (Hermes keeps it in profile.yaml; here a `display_name` file) shows as `dn (id)`.
+        shown = _root / "profiles" / name / "display_name"
+        label = f"{shown.read_text().strip()} ({name})" if shown.exists() else name
+        marker = " ◆" if name == "default" else "  "
+        print(f"{marker}{label:<15} {'—':<28} {'stopped':<12} {'—':<12} —")
+    print()
+    if os.environ.get("FAKE_HERMES_SHARED_WARNING") == "1":
+        # As Hermes's `_shared_credential_warnings`, after the table.
+        print("⚠ Profile 'coder' shares its telegram credential with default: two gateways would fight over it.")
+
+
+def plugins_lists(cfg, name, enable):
+    plugins = cfg.setdefault("plugins", {})
+    for key in ("enabled", "disabled"):
+        names = [n for n in plugins.get(key) or [] if n != name]
+        if enable and key == "enabled":
+            names.append(name)
+        if names:
+            plugins[key] = names
+        else:
+            plugins.pop(key, None)
+    if not plugins:
+        del cfg["plugins"]
+
+
+def plugins_enable(name):
+    if not (HOME / "plugins" / name).is_dir():
+        sys.exit(f"Plugin '{name}' is not installed")
+    cfg = config()
+    if name in ((cfg.get("plugins") or {}).get("enabled") or []):
+        print(f"Plugin '{name}' is already enabled.")
+        return
+    plugins_lists(cfg, name, enable=True)
+    CONFIG.write_text(json.dumps(cfg))
+    print(f"✓ Plugin {name} enabled.")
+
+
+def plugins_remove(name):
+    if not (HOME / "plugins" / name).is_dir():
+        sys.exit(f"Plugin '{name}' is not installed")
+    if os.environ.get("FAKE_HERMES_REMOVE_FAILS"):
+        # Not Hermes's: a rewritten Hermes leaving code in the plugin and saying it failed.
+        (HOME / "plugins" / name / "hook.py").write_text("raise SystemExit")
+        sys.exit("plugins remove failed")
+    if os.environ.get("FAKE_HERMES_LINK_PLUGINS"):
+        # Not Hermes's: a rewritten Hermes leaving `plugins` a link to another folder holding a `wisp`.
+        shutil.rmtree(HOME / "plugins")
+        os.symlink(os.environ["FAKE_HERMES_LINK_PLUGINS"], HOME / "plugins")
+        return
+    shutil.rmtree(HOME / "plugins" / name)
+    cfg = config()
+    if "plugins" in cfg:
+        plugins_lists(cfg, name, enable=False)
+        CONFIG.write_text(json.dumps(cfg))
+    print(f"✗ Plugin {name} removed from {HOME / 'plugins'}")
+
+
+def main(argv):
+    # Not Hermes's: a Hermes whose source the model rewrote, reading Wisp's zone or the plugin's pin.
+    if os.environ.get("FAKE_HERMES_READ"):
+        try:
+            Path(os.environ["FAKE_HERMES_READ"]).read_bytes()
+        except OSError:
+            pass
+        else:
+            sys.exit(f"read {os.environ['FAKE_HERMES_READ']}: this hermes is not sandboxed")
+    if os.environ.get("FAKE_HERMES_TAMPER"):
+        for plugin in [_root / "plugins" / "wisp", *(_root / "profiles").glob("*/plugins/wisp")]:
+            if plugin.is_dir():
+                try:
+                    (plugin / "pin.json").write_text("{}")
+                except OSError:
+                    pass
+    if argv == ["--version"]:
+        print(f"Hermes Agent v{os.environ.get('FAKE_HERMES_VERSION', '0.22.7')} (2026.11.04)")
+        return
+    with open(HOME / "argv.log", "a") as log:
+        log.write(json.dumps(argv) + "\n")
+    # Which of Wisp's variables (its own, its config's secrets) reached Hermes, by name.
+    with open(HOME / "env.log", "a") as log:
+        log.write(json.dumps(sorted(k for k in os.environ if k.startswith(("WISP_", "TEE_LLM_", "PROXY_", "LANGFUSE_")))) + "\n")
+    if os.environ.get("FAKE_HERMES_FAILS") and " ".join(argv) == os.environ["FAKE_HERMES_FAILS"]:
+        # Not Hermes's: a rewritten Hermes exiting 1 on this one command.
+        sys.exit(f"{argv[0]} failed")
+    if argv == ["profile", "list"]:
+        profile_list()
+    elif argv == ["config", "path"]:
+        print(os.environ.get("FAKE_HERMES_CONFIG_PATH") or CONFIG)
+    elif argv == ["config", "env-path"]:
+        print(os.environ.get("FAKE_HERMES_ENV_PATH") or HOME / ".env")
+    elif argv[:2] == ["plugins", "enable"] and len(argv) == 3:
+        plugins_enable(argv[2])
+    elif argv[:2] == ["plugins", "remove"] and len(argv) == 3:
+        plugins_remove(argv[2])
+    elif argv[:2] == ["config", "set"] and len(argv) == 4:
+        config_set(argv[2], argv[3])
+    elif argv[:2] == ["config", "unset"] and len(argv) == 3:
+        config_unset(argv[2])
+    elif argv[:2] == ["config", "get"] and argv[3:] == ["--json"]:
+        config_get(argv[2])
+    elif argv[:1] == ["slash"] and len(argv) in (2, 3):
+        print(load_plugin().commands[argv[1]](argv[2] if len(argv) == 3 else ""))
+    elif argv == ["sections"]:
+        # Not Hermes's: the system prompt sections a new session would get.
+        print(json.dumps(load_plugin().sections))
+    elif argv == ["pre-tool-call"]:
+        # Not Hermes's: each `[tool_name, args]` of the JSON list on stdin, through the plugin's
+        # `pre_tool_call` hooks; prints the block message of each, null when it proceeds.
+        ctx = load_plugin()
+        print(json.dumps([pre_tool_call(ctx, name, args) for name, args in json.load(sys.stdin)]))
+    elif argv[:2] == ["gateway", "run"]:
+        # A gateway, as far as the sandbox is concerned: the plugin loaded, then waiting for its signals.
+        load_plugin()
+        signal.pause()
+    elif argv[:1] == ["python"] and len(argv) == 2:
+        # Not Hermes's: Python run in this process, which loads the plugin by calling `load_plugin()`.
+        exec(argv[1], {"load_plugin": load_plugin})
+    else:
+        plugin_command(argv)
+
+
+main(ARGV)

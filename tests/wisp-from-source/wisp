@@ -1,0 +1,5 @@
+#!/bin/sh
+# The real `wisp`, from a wisp-agent checkout: what the plugin re-execs Hermes through on Linux
+# $WISP_AGENT_REPO, else the wisp-agent beside this repository.
+repo="${WISP_AGENT_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)/wisp-agent}"
+exec "$repo/node_modules/.bin/tsx" "$repo/src/index.ts" "$@"
