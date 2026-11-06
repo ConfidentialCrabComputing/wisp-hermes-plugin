@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ URL = "https://wisp.tail1234.ts.net/mcp"
 ENABLED = {"plugins": {"enabled": ["wisp"]}}
 
 
+@unittest.skipIf(sys.platform == "win32", "the plugin runs `hermes` by name, which Windows cannot find for the fake's shebang script")
 class Connect(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-"))

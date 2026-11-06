@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -38,7 +39,8 @@ class Commands(unittest.TestCase):
         (self.home / "config.yaml").write_text(json.dumps(self.config))
         (self.home / "tools.json").write_text(json.dumps(tools or {}))
         env = {**os.environ, "HERMES_HOME": str(self.home), "PATH": f"{FAKE}{os.pathsep}{os.environ['PATH']}"}
-        done = subprocess.run(["hermes", "slash", name, args], env=env, capture_output=True, text=True)
+        # By its interpreter: Windows does not start a script through its shebang.
+        done = subprocess.run([sys.executable, str(FAKE / "hermes"), "slash", name, args], env=env, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout
 

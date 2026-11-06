@@ -9,7 +9,6 @@ import http.server
 import importlib.util
 import json
 import os
-import pty
 import random
 import shutil
 import signal
@@ -30,6 +29,7 @@ PLUGIN = Path(__file__).resolve().parents[1]
 UNPROTECTED = "Wisp's zone is unprotected"
 macos = unittest.skipUnless(sys.platform == "darwin", "the macOS sandbox")
 linux = unittest.skipUnless(sys.platform == "linux", "the Linux sandbox")
+posix = unittest.skipIf(sys.platform == "win32", "needs POSIX: a terminal, a script's shebang, or a sandbox to warn of")
 
 
 def _bwrap_sandboxes():
@@ -249,6 +249,7 @@ except OSError:
     def test_with_no_terminal_it_says_nothing_of_typing_into_one(self):
         self.assertNotIn("type commands", self.hermes("python", "load_plugin()", stdin="").stderr)
 
+    @posix
     def test_a_zone_it_cannot_read_warns(self):
         # Connected to a loopback port nothing listens on, with no zone cached.
         closed = socket.create_server(("127.0.0.1", 0))
@@ -1139,6 +1140,7 @@ except OSError:
 
         self.assertEqual(json.loads((self.plugin / "zone.json").read_text()), zone)
 
+    @posix
     def test_a_pinned_profile_that_comes_up_unsandboxed_warns(self):
         shutil.rmtree(self.data_dir)
         shutil.rmtree(self.bank)
@@ -1197,6 +1199,7 @@ except OSError:
         self.assertNotIn("is not there yet", stderr)
 
 
+@posix
 class ProbeFailures(unittest.TestCase):
     """`_reexec` against a `wisp` that fails a chosen number of times, keyed by its mode and the folders it was given
     (a toggled lock, a load that trips a timeout), and logs each run: no bubblewrap needed, so this runs on macOS too."""
@@ -1374,7 +1377,10 @@ class SandboxModule(unittest.TestCase):
         with patch.object(importlib.util, "find_spec", return_value=None):
             self.assertFalse(self.sandbox._knows_external_supervisor())
 
+    @posix
     def test_a_controlling_terminal_is_found_with_stdin_elsewhere(self):
+        import pty  # Here: on Windows it fails through `termios`, and at the top it would fail the whole module.
+
         read, write = os.pipe()
         pid, fd = pty.fork()
         if pid == 0:
@@ -1391,6 +1397,7 @@ class SandboxModule(unittest.TestCase):
 
         self.assertEqual(said, b"yes")
 
+    @posix
     def test_a_process_with_no_controlling_terminal_has_none(self):
         done = subprocess.run([sys.executable, "-c", f"""
 import importlib.util

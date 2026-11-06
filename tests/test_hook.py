@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -17,6 +18,7 @@ ZONE = {"dataDir": "/home/u/.wisp", "deskRoot": "/home/u/Wisp",
         "privateFolders": [{"path": "/home/u/bank"}], "services": ["gmail"]}
 
 
+@unittest.skipIf(sys.platform == "win32", "POSIX paths throughout, which are not absolute on Windows")
 class Hook(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-hook-"))
