@@ -53,6 +53,8 @@ committed code) in every Hermes profile, connects it over loopback, and sandboxe
 - A sandbox start that fails leaves Hermes running without the sandbox, saying so on stderr and in the log. Exiting
   instead would keep Hermes from starting. A process left from an earlier Hermes, or an `LD_PRELOAD` in its `.env`, can
   use this at the next start.
+- On Windows the plugin is for connecting to a Wisp on another machine. A zone on the same Windows machine is not
+  protected: there is no sandbox, and the check on Hermes's tool calls is untested there.
 
 ## Tests
 
