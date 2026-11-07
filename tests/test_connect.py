@@ -12,7 +12,7 @@ from pathlib import Path
 FAKE = Path(__file__).resolve().parent / "fake"
 PLUGIN = Path(__file__).resolve().parents[1]
 CREDENTIAL = "wisp_hermes_s3cr3t-credential"
-URL = "https://wisp.tail1234.ts.net/mcp"
+URL = "https://wisp.example.ts.net/mcp"
 # Hermes loads the plugin, and so has `hermes wisp`, only once `plugins.enabled` lists it.
 ENABLED = {"plugins": {"enabled": ["wisp"]}}
 

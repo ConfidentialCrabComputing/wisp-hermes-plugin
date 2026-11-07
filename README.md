@@ -53,7 +53,7 @@ python3 -m unittest discover -s tests
 
 Standard library only, against the fake `hermes` in `tests/fake`. `test_install.py` needs a real `hermes` on PATH and
 skips without one. Linux's sandbox tests need a wisp-agent checkout (`$WISP_AGENT_REPO`, else `../wisp-agent`) and
-bubblewrap, as root on Ubuntu, and skip without them.
+bubblewrap, as root on Ubuntu, and skip without them. wisp-agent is private, so without access to it they skip.
 
 ## Changing the plugin
 
