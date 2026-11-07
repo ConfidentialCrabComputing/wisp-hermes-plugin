@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,7 @@ ZONE = {"dataDir": "/home/u/.wisp", "deskRoot": "/home/u/.wisp/desks",
         "privateFolders": [{"path": "/home/u/bank"}], "services": ["gmail"]}
 
 
+@unittest.skipIf(sys.platform == "win32", "POSIX paths throughout, which are not absolute on Windows")
 class Rule(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-zone-"))

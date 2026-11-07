@@ -44,6 +44,17 @@ committed code) in every Hermes profile, connects it over loopback, and sandboxe
 - On one machine, the sandbox stops Hermes reading Wisp's zone itself, not a model set on escaping it: anything Hermes
   asks an unsandboxed process to run (an app it opens or scripts, a shell startup file or a tool on PATH it rewrites)
   runs outside the sandbox.
+- On Linux, `sudo` and other setuid programs do not work inside the sandboxed Hermes: bubblewrap always sets
+  `no_new_privs`, as without it any setuid program inside would regain root and undo the sandbox. Run a command that
+  needs root outside Hermes.
+- On Linux, a Hermes running as root has Private Folders hidden from ordinary reads only: root reaches them through
+  `umount`, `/proc/<pid>/root` or the raw disk. No place on one machine is out of root's reach, so run Hermes as a
+  regular user to keep it out.
+- A sandbox start that fails leaves Hermes running without the sandbox, saying so on stderr and in the log. Exiting
+  instead would keep Hermes from starting. A process left from an earlier Hermes, or an `LD_PRELOAD` in its `.env`, can
+  use this at the next start.
+- On Windows the plugin is for connecting to a Wisp on another machine. A zone on the same Windows machine is not
+  protected: there is no sandbox, and the check on Hermes's tool calls is untested there.
 
 ## Tests
 
@@ -57,7 +68,7 @@ bubblewrap, as root on Ubuntu, and skip without them.
 
 ## Changing the plugin
 
-The `wisp` binary embeds this repository's committed HEAD (all of it but `tests/`). After a commit here, run
+The `wisp` binary embeds this repository's committed HEAD (all of it but `tests/` and `.github/`). After a commit here, run
 `pnpm run hermes-plugin:sync` in wisp-agent and commit the archive there.
 
 ## License

@@ -1,13 +1,18 @@
-"""`hermes wisp connect` against a fake `hermes` that records its argv and
-keeps a temp Hermes home. Run: python3 -m unittest discover -s tests"""
+"""`hermes wisp connect`: what it decides in-process on every OS, then against a fake `hermes` that
+records its argv and keeps a temp Hermes home. Run: python3 -m unittest discover -s tests"""
 
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 FAKE = Path(__file__).resolve().parent / "fake"
 PLUGIN = Path(__file__).resolve().parents[1]
@@ -15,6 +20,59 @@ CREDENTIAL = "wisp_hermes_s3cr3t-credential"
 URL = "https://wisp.tail1234.ts.net/mcp"
 # Hermes loads the plugin, and so has `hermes wisp`, only once `plugins.enabled` lists it.
 ENABLED = {"plugins": {"enabled": ["wisp"]}}
+
+
+class ConnectDecides(unittest.TestCase):
+    """The plugin in this process, its one child (`hermes config`) recorded and not started."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-"))
+        self.addCleanup(shutil.rmtree, self.home)
+        plugin = self.home / "plugins" / "wisp"
+        shutil.copytree(PLUGIN, plugin, ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
+        (self.home / "config.yaml").write_text(json.dumps(ENABLED))
+        for patch in (mock.patch.dict(os.environ, HERMES_HOME=str(self.home)), mock.patch.dict(sys.modules),
+                      mock.patch.object(sys, "path", [str(FAKE), *sys.path])):
+            patch.start()
+            self.addCleanup(patch.stop)
+        children = mock.patch("subprocess.run")
+        self.children = children.start()
+        self.addCleanup(children.stop)
+        spec =importlib.util.spec_from_file_location(
+            "hermes_plugins_wisp", plugin / "__init__.py", submodule_search_locations=[str(plugin)])
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = package
+        spec.loader.exec_module(package)
+        self.plugin = package.connect
+
+    def connect(self, url):
+        with mock.patch("sys.stdin", io.StringIO(CREDENTIAL + "\n")), contextlib.redirect_stdout(io.StringIO()):
+            self.plugin.connect(url)
+
+    def test_refuses_plain_http_off_loopback_naming_both_recipes(self):
+        for url in ("http://wisp.example.com:3009/mcp", "http://localhost.example.com/mcp",
+                    "http://127.0.0.1.example.com/mcp", "http://127.0.0.1@example.com/mcp"):
+            with self.subTest(url=url):
+                with self.assertRaises(SystemExit) as refused:
+                    self.connect(url)
+
+                for recipe in ("Tailscale Serve", "Caddy", "ssh -L"):
+                    self.assertIn(recipe, str(refused.exception))
+                self.children.assert_not_called()
+                self.assertFalse((self.home / ".env").exists())
+
+    def test_registers_https_and_loopback_http_with_the_credential_off_the_argv(self):
+        for url in (URL, "http://127.0.0.1:3009/mcp", "http://localhost:3009/mcp", "http://[::1]:3009/mcp"):
+            with self.subTest(url=url):
+                self.children.reset_mock()
+
+                self.connect(url)
+
+                argvs = [call.args[0] for call in self.children.call_args_list]
+                self.assertEqual(argvs[0][:6], ["hermes", "-p", "default", "config", "set", "mcp_servers.wisp"])
+                self.assertEqual(json.loads(argvs[0][6])["url"], url)
+                self.assertNotIn(CREDENTIAL, json.dumps(argvs))
+                self.assertIn(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}", (self.home / ".env").read_text())
 
 
 class Connect(unittest.TestCase):
@@ -30,7 +88,7 @@ class Connect(unittest.TestCase):
     def hermes(self, *argv, stdin="", **extra_env):
         env = {**os.environ, "HERMES_HOME": str(self.home), "PATH": f"{FAKE}{os.pathsep}{os.environ['PATH']}",
                **extra_env}
-        return subprocess.run(["hermes", *argv], input=stdin, env=env, capture_output=True, text=True)
+        return subprocess.run([sys.executable, str(FAKE / "hermes"), *argv], input=stdin, env=env, capture_output=True, text=True)
 
     def calls(self):
         """The argv of every `hermes config` call, in order."""
@@ -46,8 +104,10 @@ class Connect(unittest.TestCase):
         except OSError:
             return {}
 
-    def connect(self, url=URL):
-        done = self.hermes("wisp", "connect", url, stdin=CREDENTIAL + "\n")
+    def connect(self, url=URL, *profile):
+        if sys.platform == "win32":
+            self.skipTest("the plugin runs `hermes` by name, which Windows cannot find for the fake's shebang script")
+        done = self.hermes(*profile, "wisp", "connect", url, stdin=CREDENTIAL + "\n")
         self.assertEqual(done.returncode, 0, done.stderr)
         return done
 
@@ -212,7 +272,7 @@ class Connect(unittest.TestCase):
         coder = self.sticky_coder()
         before = (coder / "config.yaml").read_text()
 
-        self.hermes("-p", "default", "wisp", "connect", URL, stdin=CREDENTIAL + "\n")
+        self.connect(URL, "-p", "default")
 
         self.assertEqual(self.config()["mcp_servers"]["wisp"]["url"], URL)
         self.assertEqual(self.config()["timeouts"]["tools"], {"sequential_call": 1900, "concurrent_batch": 1900})
