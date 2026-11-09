@@ -1290,6 +1290,47 @@ if tried < json.load(open({str(self.tmp / "plan")!r})).get(key, 0):
         self.assertEqual(runs.count("--print-args a b"), 3)
 
 
+@posix
+class LoaderVariables(unittest.TestCase):
+    """What a model can write into Hermes's `.env`, which Hermes loads into its environment before the plugin: the
+    dynamic loader's variables, which would run its code in each process started outside the sandbox. `_reexec`
+    against a `wisp` and a bubblewrap that each log their arguments and environment: no bubblewrap needed."""
+
+    LOADER = {"LD_PRELOAD": "libc.so.6", "LD_LIBRARY_PATH": "/nowhere", "LD_AUDIT": "/nowhere/audit.so", "GCONV_PATH": "/nowhere"}
+
+    def test_neither_wisp_nor_bubblewrap_sees_them_and_the_sandboxed_hermes_gets_them_back(self):
+        spec = importlib.util.spec_from_file_location("wisp_sandbox_under_test", PLUGIN / "sandbox.py")
+        sandbox = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sandbox)
+        tmp = Path(tempfile.mkdtemp(prefix="wisp-hermes-loader-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        log = tmp / "log"
+        for name in ("wisp", "bwrap"):
+            (tmp / name).write_text(f"""#!{sys.executable}
+import json, os, sys
+with open({str(log)!r}, "a") as log:
+    log.write(json.dumps({{"argv": sys.argv[1:], "env": dict(os.environ)}}) + "\\n")
+if sys.argv[1:3] == ["sandbox-exec", "--print-args"]:
+    sys.stdout.write("--bind\\0/\\0/\\0--\\0hermes")
+""")
+            (tmp / name).chmod(0o755)
+
+        with patch.dict(os.environ, self.LOADER), patch.object(sandbox, "BWRAP", str(tmp / "bwrap")), \
+                patch.object(sandbox, "_inherited_fds", list):
+            sandbox._reexec(["/zone/a"], "/zone/plugin", str(tmp / "wisp"), [])
+
+        runs = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([run["argv"][:2] for run in runs[:2]], [["sandbox-exec", "--check"], ["sandbox-exec", "--print-args"]])
+        for run in runs:
+            self.assertEqual(sorted(set(self.LOADER) & set(run["env"])), [], run["argv"])
+        # As bubblewrap: its own environment, and each `--setenv` among its options, for the command after `--`.
+        argv = runs[2]["argv"]
+        options = argv[:argv.index("--")]
+        hermes = {**runs[2]["env"], **{options[i + 1]: options[i + 2] for i, arg in enumerate(options) if arg == "--setenv"}}
+        self.assertEqual({name: hermes.get(name) for name in self.LOADER}, self.LOADER)
+        self.assertEqual(argv[argv.index("--"):], ["--", "hermes"])
+
+
 class SandboxModule(unittest.TestCase):
     def setUp(self):
         spec = importlib.util.spec_from_file_location("wisp_sandbox_under_test", PLUGIN / "sandbox.py")
@@ -1325,16 +1366,53 @@ class SandboxModule(unittest.TestCase):
         # A terminal tab's shell carries an INVOCATION_ID too; nothing respawns what runs in its scope.
         self.assertFalse(back(["-m", "hermes_cli.main", "gateway", "run"], unit, "0::/user.slice/vte-spawn-1.scope\n"))
 
-    def respawned(self, shown, cgroup="0::/system.slice/gw.service\n"):
-        """Whether the unit is taken to respawn this process, with `shown` as `systemctl show`'s answer or failure."""
-        def run(argv, **_):
-            self.asked = argv
+    def respawned(self, shown, cgroup="0::/system.slice/gw.service\n", installed=(1,)):
+        """Whether the unit is taken to respawn this process, with `shown` as `systemctl show`'s answer or failure, and
+        a `systemctl` in each of the places `installed` numbers among three it looks in; `self.asked` the argv, else None."""
+        self.asked = None
+        tmp = Path(tempfile.mkdtemp(prefix="wisp-hermes-systemctl-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        places = [tmp / str(n) for n in range(3)]
+        for n, place in enumerate(places):
+            place.mkdir()
+            if n in installed:
+                (place / "systemctl").write_text("#!/bin/sh\n")
+                (place / "systemctl").chmod(0o755)
+        self.places = places
+
+        def run(argv, **kwargs):
+            self.asked, self.asked_env = argv, kwargs.get("env")
             if isinstance(shown, Exception):
                 raise shown
             return SimpleNamespace(stdout=shown, returncode=0)
 
-        with patch.object(self.sandbox.subprocess, "run", run):
+        with patch.object(self.sandbox.subprocess, "run", run), patch.object(self.sandbox, "SYSTEMCTL_DIRS", list(map(str, places))):
             return self.sandbox._a_unit_respawns_this_process(cgroup)
+
+    @posix
+    def test_systemctl_is_the_first_of_its_places_and_never_one_on_path(self):
+        shown = f"MainPID={os.getpid()}\nRestart=always\n"
+        # What a model can put first on PATH through `.env`.
+        planted = Path(tempfile.mkdtemp(prefix="wisp-hermes-path-"))
+        self.addCleanup(shutil.rmtree, planted)
+        (planted / "systemctl").write_text("#!/bin/sh\n")
+        (planted / "systemctl").chmod(0o755)
+        with patch.dict(os.environ, {"PATH": f"{planted}{os.pathsep}{os.environ['PATH']}"}):
+            self.assertTrue(self.respawned(shown, installed=(1, 2)))
+            self.assertEqual(self.asked[0], str(self.places[1] / "systemctl"))
+
+            # Not even one on PATH: no `systemctl`, no unit to hand the gateway back to.
+            self.assertFalse(self.respawned(shown, installed=()))
+            self.assertIsNone(self.asked)
+
+    @posix
+    def test_systemctl_runs_without_the_loader_variables_and_with_what_the_user_bus_needs(self):
+        user = {"HOME": "/home/u", "XDG_RUNTIME_DIR": "/run/user/1000", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+        with patch.dict(os.environ, {**LoaderVariables.LOADER, **user}):
+            self.respawned(f"MainPID={os.getpid()}\nRestart=always\n", "0::/user.slice/user-1000.slice/user@1000.service/gw.service\n")
+
+        self.assertEqual([name for name in LoaderVariables.LOADER if name in self.asked_env], [])
+        self.assertEqual({name: self.asked_env.get(name) for name in user}, user)
 
     def test_only_this_process_as_main_with_a_restart_that_follows_every_failed_exit_counts(self):
         for restart, expected in (("always", True), ("on-failure", True), ("on-abnormal", False), ("on-abort", False),
@@ -1361,9 +1439,9 @@ class SandboxModule(unittest.TestCase):
     def test_it_asks_the_systemd_that_owns_the_cgroup(self):
         shown = f"MainPID={os.getpid()}\nRestart=always\n"
         self.respawned(shown)
-        self.assertEqual(self.asked[:3], ["systemctl", "show", "gw.service"])
+        self.assertEqual(self.asked[1:3], ["show", "gw.service"])
         self.assertTrue(self.respawned(shown, "0::/user.slice/user-1000.slice/user@1000.service/app.slice/gw.service\n"))
-        self.assertEqual(self.asked[:4], ["systemctl", "--user", "show", "gw.service"])
+        self.assertEqual(self.asked[1:4], ["--user", "show", "gw.service"])
 
     def test_a_hermes_too_old_for_the_flag_is_not_given_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1538,6 +1616,19 @@ while True:
         hermes.send_signal(signal.SIGUSR1)
 
         self.assertEqual(hermes.wait(timeout=20), 128 + signal.SIGKILL)
+
+    def test_the_loader_variables_hermes_was_started_with_reach_the_sandboxed_hermes_and_not_the_supervisor(self):
+        loader = LoaderVariables.LOADER
+        hermes, first = self.start(f"""
+import json, os, signal
+load_plugin()
+print(json.dumps({{name: os.environ.get(name) for name in {list(loader)!r}}}), flush=True)
+signal.pause()
+""", env=loader)
+
+        self.assertEqual(json.loads(first), loader)
+        supervisor = dict(entry.split(b"=", 1) for entry in Path(f"/proc/{hermes.pid}/environ").read_bytes().split(b"\0") if entry)
+        self.assertEqual([name for name in loader if name.encode() in supervisor], [])
 
     def test_it_relays_only_what_hermes_itself_may_tell_systemd(self):
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as real:

@@ -20,6 +20,8 @@ LEGACY_TIOCSTI = "/proc/sys/dev/tty/legacy_tiocsti"
 BWRAP = "/usr/bin/bwrap"
 EXTERNAL_SUPERVISOR = "--external-supervisor"
 PROBE_TRIES = 3
+# Where `systemctl` is looked for, never through `PATH`, which `.env` sets. The third is NixOS's.
+SYSTEMCTL_DIRS = ["/usr/bin", "/bin", "/run/current-system/sw/bin", "/usr/sbin", "/sbin"]
 
 
 def _literal(path):
@@ -70,6 +72,17 @@ def _sandboxed(denied, plugin_dir):
             and all(mounts.get(folder, (None,))[0] == b"tmpfs" for folder in denied if os.path.isdir(folder)))
 
 
+def _loads_code(name):
+    """Whether the dynamic loader (or glibc's `iconv`) runs code a variable `name` points at: Hermes loads `.env`
+    into its environment before plugins load, and its model can write that file."""
+    return name.startswith("LD_") or name == "GCONV_PATH"
+
+
+def _outside(env):
+    """`env` for a process started outside the sandbox: without what would run the model's code in it."""
+    return {name: value for name, value in env.items() if not _loads_code(name)}
+
+
 def _notify_socket(env):
     """With systemd watching: a datagram socket of its own for the sandboxed Hermes, named in `env`, its bound
     fd handed to the supervisor. Bound before Hermes starts, so no datagram finds it missing. Abstract, as
@@ -118,10 +131,13 @@ def _a_unit_respawns_this_process(cgroup):
     and the like), and a false no only a running one the update restarts itself (a `sudo -u x hermes` wrapper). So in doubt, no.
     One `systemctl show` of up to 10 seconds, on a start of `gateway run` in a service only."""
     path = cgroup.strip().splitlines()[-1].split(":", 2)[-1]  # A unit's name may hold a colon.
-    scope = ["systemctl", "--user"] if "/user@" in path else ["systemctl"]
+    systemctl = next((at for at in (os.path.join(folder, "systemctl") for folder in SYSTEMCTL_DIRS) if os.access(at, os.X_OK)), None)
+    if systemctl is None:
+        return False
+    scope = [systemctl, "--user"] if "/user@" in path else [systemctl]
     try:
         shown = subprocess.run([*scope, "show", path.rsplit("/", 1)[-1], "--property=MainPID,Restart"],
-                               capture_output=True, text=True, timeout=10).stdout
+                               capture_output=True, text=True, timeout=10, env=_outside(os.environ)).stdout
     except (OSError, subprocess.SubprocessError, ValueError):  # ValueError: output it cannot decode.
         return False
     said = dict(line.split("=", 1) for line in shown.splitlines() if "=" in line)
@@ -179,7 +195,8 @@ def _check(denied, plugin_dir, wisp):
     user can write decides it: bubblewrap says `child-pid` before it mounts, so a mount that fails after the takeover
     would end in no Hermes. What a folder would take from Hermes's start is `_start_root`'s, by path."""
     try:
-        check = subprocess.run([wisp, "sandbox-exec", "--check", *_folders(denied, plugin_dir)], capture_output=True, text=True, timeout=60)
+        check = subprocess.run([wisp, "sandbox-exec", "--check", *_folders(denied, plugin_dir)], capture_output=True, text=True,
+                               timeout=60, env=_outside(os.environ))
     except (OSError, subprocess.SubprocessError) as exc:
         return f"wisp sandbox-exec --check failed: {exc}"
     if check.returncode == 0:
@@ -229,7 +246,8 @@ def _reexec(denied, plugin_dir, wisp, held):
     command = _command()
     for _ in range(PROBE_TRIES):
         try:
-            printed = subprocess.run([wisp, "sandbox-exec", "--print-args", *folders, "--", *command], capture_output=True, timeout=60)
+            printed = subprocess.run([wisp, "sandbox-exec", "--print-args", *folders, "--", *command], capture_output=True,
+                                     timeout=60, env=_outside(os.environ))
         except (OSError, subprocess.SubprocessError) as exc:
             why = str(exc)
             continue
@@ -240,11 +258,14 @@ def _reexec(denied, plugin_dir, wisp, held):
         return f"wisp sandbox-exec failed: {why}"
     env = dict(os.environ)
     notify = _notify_socket(env)
+    # bubblewrap passes its own environment on: the sandboxed Hermes gets the rest back as it was (CUDA, conda).
+    # Options, so before the printed `--` and the command.
+    kept = [arg for name, value in env.items() if _loads_code(name) for arg in ("--setenv", name, value)]
     sys.stdout.flush()
     sys.stderr.flush()
     info, written = os.pipe()
     try:
-        started = subprocess.Popen([BWRAP, "--info-fd", str(written), *printed.stdout.split(b"\0")], env=env,
+        started = subprocess.Popen([BWRAP, "--info-fd", str(written), *kept, *printed.stdout.split(b"\0")], env=_outside(env),
                                    pass_fds=[written, *_inherited_fds()])
     finally:
         os.close(written)
@@ -256,8 +277,9 @@ def _reexec(denied, plugin_dir, wisp, held):
     if notify is not None:
         os.set_inheritable(notify.fileno(), True)
     try:
-        os.execv(sys.executable, [sys.executable, "-I", "-S", os.path.join(plugin_dir, "supervise.py"),
-                                  str(started.pid), str(child), str(notify.fileno()) if notify is not None else "-"])
+        # `-I` drops `PYTHON*`, not the loader's variables. Its `NOTIFY_SOCKET` stays systemd's own.
+        os.execve(sys.executable, [sys.executable, "-I", "-S", os.path.join(plugin_dir, "supervise.py"),
+                                   str(started.pid), str(child), str(notify.fileno()) if notify is not None else "-"], _outside(os.environ))
     except OSError as exc:
         # The sandboxed Hermes runs and no supervisor would forward to it: it goes, and this one carries on.
         os.kill(child, signal.SIGKILL)
