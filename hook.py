@@ -63,8 +63,8 @@ def make_hook(zone, config_path, moved=()):
     """The hook for `zone` (None: only the switch-off attempts are refused); `config_path` is Hermes's
     `config.yaml`, whose `plugins` section enables this plugin; `moved` names Hermes's MCP servers
     switched off because Wisp holds them now."""
-    given = ([zone["dataDir"], zone["deskRoot"], *(f["path"] for f in zone.get("privateFolders") or [])]
-             if zone else [])
+    given = ([zone["dataDir"], zone["deskRoot"], *(f["path"] for f in zone.get("privateFolders") or []),
+              *(zone.get("secretFiles") or [])] if zone else [])
     home = os.path.expanduser("~")
     # zone.json is writable by Hermes's model: an empty, relative, root or home folder would refuse nearly
     # every call, on every start the cache stands in for the Runtime.

@@ -151,6 +151,53 @@ load_plugin()
 print(subprocess.run(["cat", {str(self.bank / "secret.txt")!r}], capture_output=True).returncode)""")
         self.assertNotEqual(done.stdout.strip(), "0")
 
+    @sandboxed
+    def test_wisps_secret_files_cannot_be_read_or_replaced_and_their_folder_stays_usable(self):
+        config = self.tmp / "config" / "wisp"
+        config.mkdir(parents=True)
+        key = config / "master.key"
+        key.write_text("root key")
+        serve = self.tmp / "serve.json"
+        serve.write_text("agent token")
+        self.zone["secretFiles"] = [str(key), str(serve)]
+
+        # On Linux the file reads as the empty `/dev/null` over it, and a write goes there; on macOS both are refused.
+        done = self.python(f"""
+import os
+load_plugin()
+for path in {[str(key), str(serve)]!r}:
+    for attempt in ("read", "write", "replace", "remove", "link"):
+        try:
+            if attempt == "read":
+                print("read", repr(open(path).read()))
+                continue
+            elif attempt == "write":
+                open(path, "w").write("x")
+            elif attempt == "replace":
+                open(path + ".new", "w").write("x")
+                os.replace(path + ".new", path)
+            elif attempt == "remove":
+                os.remove(path)
+            else:
+                os.link(path, path + ".link")
+                print("link", repr(open(path + ".link").read()))
+                continue
+            print(attempt, "done")
+        except OSError:
+            print(attempt, "refused")
+open({str(self.tmp / "beside.txt")!r}, "w").write("beside")
+print("beside", open({str(self.tmp / "beside.txt")!r}).read())""")
+
+        seen = done.stdout.splitlines()
+        self.assertEqual(seen[-1], "beside beside", done.stderr)
+        for line in seen[:-1]:
+            self.assertIn(line, ["read refused", "read ''", "write refused", "write done", "replace refused",
+                                 "remove refused", "link refused", "link ''"])
+        self.assertEqual(len(seen), 11)
+        self.assertEqual(key.read_text(), "root key")
+        self.assertEqual(serve.read_text(), "agent token")
+        self.assertNotIn(UNPROTECTED, done.stderr)
+
     @macos
     def test_a_zone_folder_cannot_be_moved_out_from_under_the_sandbox_by_renaming_its_parent(self):
         parent = self.tmp / "docs"
@@ -594,6 +641,28 @@ except OSError:
 
     @linux
     @sandboxed
+    def test_a_secret_file_bubblewrap_cannot_mount_is_left_out_saying_so_and_the_others_stay_sandboxed(self):
+        deep = str(self.tmp) + ("/" + "x" * 200) * 21
+        deep = deep[:4080]
+        os.makedirs(deep)
+        key = os.path.join(deep, "master.key")
+        Path(key).write_text("root key")
+        self.zone["secretFiles"] = [key]
+
+        done = self.python(f"""
+load_plugin()
+try:
+    open({str(self.bank / 'secret.txt')!r}).read()
+    print("read")
+except OSError:
+    print("refused")""")
+
+        self.assertEqual(done.stdout.strip(), "refused")
+        self.assertIn(UNPROTECTED, done.stderr)
+        self.assertIn("File name too long", done.stderr)
+
+    @linux
+    @sandboxed
     def test_an_fd_its_parent_passed_down_reaches_the_sandboxed_hermes(self):
         # As `hermes update` hands its checkout lock to its children: lost, the child takes the lock for another update's.
         read, write = os.pipe()
@@ -885,6 +954,19 @@ class Pin(HermesHome):
         self.assertFalse(self.readable(self.bank / "secret.txt"))
         self.assertFalse(self.readable(self.data_dir / "secret.txt"))
         self.assertTrue(self.blocked(self.bank / "secret.txt"))
+
+    @sandboxed
+    def test_the_pinned_secret_files_and_those_an_answer_adds_are_sandboxed_and_refused(self):
+        pinned, added = self.tmp / "master.key", self.tmp / "serve.json"
+        for file in (pinned, added):
+            file.write_text("secret")
+        self.pin["secretFiles"] = [str(pinned)]
+        self.pin["url"] = self.endpoint({"dataDir": str(self.data_dir), "deskRoot": str(self.data_dir / "desks"),
+                                         "privateFolders": [], "secretFiles": [str(added)], "services": []})
+
+        for file in (pinned, added):
+            self.assertFalse(self.readable(file))
+            self.assertTrue(self.blocked(file))
 
     @sandboxed
     def test_an_answer_widens_the_pinned_zone_and_never_narrows_it(self):
