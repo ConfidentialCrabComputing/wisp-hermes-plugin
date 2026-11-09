@@ -214,12 +214,12 @@ def _check_repeated(denied, plugin_dir, wisp):
     return problem
 
 
-def _reexec(denied, plugin_dir, wisp, held):
+def _reexec(denied, plugin_dir, wisp):
     """Linux: this Hermes started again under bubblewrap, with the arguments `wisp sandbox-exec` prints, and this
     process, keeping its PID, turned into the supervisor (`supervise.py`); the reason it could not or a folder was
     left out, or None when it already runs there with all of them. The fresh process has no unconfined thread, as an in-process sandbox (Landlock) would
     leave. bubblewrap's info comes through an anonymous pipe: nothing outside the sandbox opens a path a process
-    left inside could swap. Inside a sandbox over `held`, a list that fails costs no more probes: the start before this one made them."""
+    left inside could swap. Inside a sandbox, a list that fails costs no more probes: the start before this one made them."""
     if _sandboxed(denied, plugin_dir):
         return None
     # Cheap first: Hermes starts with no Node child where bubblewrap is not even there.
@@ -230,16 +230,15 @@ def _reexec(denied, plugin_dir, wisp, held):
         return "wisp is not on PATH, so Hermes cannot be re-run under bubblewrap"
     problem = _check(denied, plugin_dir, wisp)
     if problem is not None:
-        if _sandboxed(held, plugin_dir):
-            return problem
+        # Inside, bubblewrap may make no namespace (Ubuntu 25.04+'s AppArmor), so its reason would be that, not the
+        # folder's: the kernel names what the start before this one left out.
+        if _sandboxed([], plugin_dir):
+            return f"bubblewrap could not mount {', '.join(f for f in denied if not _sandboxed([f], plugin_dir))}"
         # A link a model left at an absent folder's path can resolve to what no tmpfs can cover (a folder `/bin/true` lives
         # in, or a path too long to mount): that folder goes, not the sandbox around the others.
         if _check_repeated([], plugin_dir, wisp) is not None:
             return problem
         denied = [folder for folder in denied if _check_repeated([folder], plugin_dir, wisp) is None]
-        # Already under the sandbox the first start made with these folders; `protect` says what is left out.
-        if _sandboxed(denied, plugin_dir):
-            return problem
         if (left := _check_repeated(denied, plugin_dir, wisp)) is not None:
             return left
     folders = _folders(denied, plugin_dir)
@@ -296,7 +295,7 @@ def _without_chromes_sandbox():
         os.environ["AGENT_BROWSER_ARGS"] = f"{args},--no-sandbox" if args.strip() else "--no-sandbox"
 
 
-def apply(denied, plugin_dir, wisp, held):
+def apply(denied, plugin_dir, wisp):
     """Sandboxes this process; the reason it could not or left a folder out, or None, never an exception. A second
     `sandbox_init` in one process fails, so a profile cannot be tightened once applied. On Linux `wisp` (the pinned binary,
     else the one on PATH) re-execs it under bubblewrap."""
@@ -305,7 +304,7 @@ def apply(denied, plugin_dir, wisp, held):
     try:
         if sys.platform == "linux":
             # A working start returns here only inside bubblewrap; so can a folder left out of a running sandbox.
-            problem = _reexec(denied, plugin_dir, wisp, held)
+            problem = _reexec(denied, plugin_dir, wisp)
             if _sandboxed([], plugin_dir):
                 _without_chromes_sandbox()
             return problem
@@ -450,11 +449,11 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
             denied.append(folder)
     kept = set(map(os.path.realpath, _zone_folders(pinned or zone)))
     held = [folder for folder in denied if folder in kept]
-    failed = apply(denied, plugin, wisp, held)
+    failed = apply(denied, plugin, wisp)
     # On Linux a start that works never returns here: the Hermes it starts comes through this with the sandbox up, and goes no deeper.
     left = []
     if failed and held != denied:
-        again = None if _sandboxed(held, plugin) else apply(held, plugin, wisp, held)
+        again = None if _sandboxed(held, plugin) else apply(held, plugin, wisp)
         if again is None:
             # The kernel says which: on Linux an added folder can be in the sandbox with another left out, on macOS none is.
             left = [folder for folder in denied if folder not in held and not _sandboxed([folder], plugin)]
