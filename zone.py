@@ -90,9 +90,11 @@ def widen(pin, answer):
     pinned = _folders(pin)
     answered = [] if answer is None else _answered_folders(answer)
     added = [path for path in dict.fromkeys(answered) if path not in pinned]
+    given = answer or {}
     return {"dataDir": pin["dataDir"], "deskRoot": pin["deskRoot"],
             "privateFolders": [*pin["privateFolders"], *({"path": path} for path in added)],
-            "services": (answer or {}).get("services") or []}
+            "services": given.get("services") or [],
+            **({"connectors": given["connectors"]} if "connectors" in given else {})}
 
 
 def pinned_zone(pin, credential, cache):
@@ -125,6 +127,13 @@ def _inert(text):
     return _CONTROL.sub(" ", str(text))
 
 
+def _plainly(connector):
+    """`Display (name): description`, with whatever of it the Connector has."""
+    name = connector["name"]
+    shown = f"{connector['displayName']} ({name})" if connector.get("displayName") else str(name)
+    return f"{shown}: {connector['description']}" if connector.get("description") else shown
+
+
 def routing_rule(zone):
     """The system prompt section that sends Wisp's tasks to `ask_wisp`, within Hermes's section cap: what
     does not fit is counted, not listed."""
@@ -135,7 +144,11 @@ yourself, and relay Wisp's answer; continue a Wisp conversation by passing its `
 `ask_wisp`:
 - anything that reads or changes a file in Wisp's data directory {_inert(zone["dataDir"])} or under its
 Desk root {_inert(zone["deskRoot"])};"""
-    services = [_inert(service) for service in zone.get("services") or []]
+    if "connectors" in zone:
+        services = [_inert(_plainly(connector)) for connector in zone["connectors"] or []
+                    if connector.get("status") == "connected"]
+    else:  # an older Runtime or `zone.json`: names only
+        services = [_inert(service) for service in zone.get("services") or []]
     folders = [f"- {_inert(folder['path'])}" for folder in zone.get("privateFolders") or []]
     # ponytail: rebuilds the rule per dropped item, O(n²) in the zone's size; fine for hundreds of entries.
     for shown in range(len(services) + len(folders), -1, -1):

@@ -899,6 +899,15 @@ class Pin(HermesHome):
         self.assertTrue(self.blocked(added / "secret.txt"))
         self.assertTrue(self.blocked(self.bank / "secret.txt"))
 
+    def test_the_pinned_rule_names_the_answers_connectors_plainly(self):
+        self.pin["url"] = self.endpoint({"dataDir": str(self.data_dir), "deskRoot": str(self.data_dir / "desks"),
+                                         "privateFolders": [], "services": ["my-crm"], "connectors": [
+                                             {"name": "my-crm", "displayName": "Acme CRM", "status": "connected"}]})
+
+        rule = json.loads(self.hermes("sections").stdout)["wisp-routing"]
+
+        self.assertIn("Wisp's services: Acme CRM (my-crm);", rule)
+
     def malformed_zones(self):
         """What an answer or a cached zone can hold that no folder can be: (what, the zone)."""
         zone = {"dataDir": str(self.data_dir), "deskRoot": str(self.data_dir / "desks"), "services": []}
