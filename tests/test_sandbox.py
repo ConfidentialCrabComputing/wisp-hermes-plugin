@@ -436,7 +436,7 @@ if sys.platform == "linux":
         deep = (str(self.tmp) + ("/" + "x" * 200) * 21)[:4090]
         os.makedirs(deep)
         taxes = self.tmp / "taxes"
-        for target, said in (("/usr", "/usr"), (deep, "File name too long")):
+        for target, said in (("/usr", "/usr"), (deep, f"bubblewrap could not mount {deep}")):
             with self.subTest(target[:20]):
                 taxes.symlink_to(target)
                 self.zone["privateFolders"] = [{"path": str(self.bank)}, {"path": str(taxes)}]
@@ -590,7 +590,7 @@ except OSError:
 
         self.assertEqual(done.stdout.strip(), "refused")
         self.assertIn(UNPROTECTED, done.stderr)
-        self.assertIn("File name too long", done.stderr)
+        self.assertIn(f"bubblewrap could not mount {deep}", done.stderr)
 
     @linux
     @sandboxed
@@ -1256,7 +1256,7 @@ if tried < json.load(open({str(self.tmp / "plan")!r})).get(key, 0):
         """`_reexec`, with `true` in bubblewrap's place: what it says, and each run of `wisp`, in order."""
         (self.tmp / "plan").write_text(json.dumps(plan))
         with patch.object(self.sandbox, "BWRAP", shutil.which("true")), patch.object(self.sandbox, "_inherited_fds", list):
-            said = self.sandbox._reexec([f"/zone/{folder}" for folder in folders], "/zone/plugin", str(self.wisp), [])
+            said = self.sandbox._reexec([f"/zone/{folder}" for folder in folders], "/zone/plugin", str(self.wisp))
         return said, self.log.read_text().splitlines()
 
     STARTED = "wisp sandbox-exec failed: bubblewrap exited 0"
@@ -1343,7 +1343,7 @@ if sys.argv[1:3] == ["sandbox-exec", "--print-args"]:
 
         with patch.dict(os.environ, self.LOADER), patch.object(sandbox, "BWRAP", str(tmp / "bwrap")), \
                 patch.object(sandbox, "_inherited_fds", list):
-            sandbox._reexec(["/zone/a"], "/zone/plugin", str(tmp / "wisp"), [])
+            sandbox._reexec(["/zone/a"], "/zone/plugin", str(tmp / "wisp"))
 
         runs = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual([run["argv"][:2] for run in runs[:2]], [["sandbox-exec", "--check"], ["sandbox-exec", "--print-args"]])
@@ -1379,7 +1379,7 @@ class SandboxModule(unittest.TestCase):
             os.environ.pop("AGENT_BROWSER_ARGS", None)
             if before is not None:
                 os.environ["AGENT_BROWSER_ARGS"] = before
-            self.assertIsNotNone(self.sandbox.apply(["/zone/a"], "/zone/plugin", None, []))
+            self.assertIsNotNone(self.sandbox.apply(["/zone/a"], "/zone/plugin", None))
             return os.environ.get("AGENT_BROWSER_ARGS")
 
     def test_a_linux_without_bubblewrap_and_any_other_platform_leave_chromes_own_sandbox_on(self):
