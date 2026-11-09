@@ -210,12 +210,16 @@ for path in ({str(self.plugin / "__init__.py")!r}, {str(self.plugin / "zone.json
         self.assertIn(str(self.plugin / "zone.json"), done.stdout)
 
     @sandboxed
-    def test_the_browser_runs_without_chromes_own_sandbox(self):
-        done = self.python("""
+    def test_the_browser_runs_without_chromes_own_sandbox_after_the_users_own_args(self):
+        for before, after in ((None, "--no-sandbox"), ("", "--no-sandbox"), ("--lang=de", "--lang=de,--no-sandbox"),
+                              ("--no-sandbox,--lang=de", "--no-sandbox,--lang=de")):
+            with self.subTest(before=before):
+                done = self.python("""
 import os
 load_plugin()
-print(os.environ.get("AGENT_BROWSER_ARGS"))""")
-        self.assertEqual(done.stdout.strip(), "--no-sandbox")
+print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARGS", *([] if before is None else [f"AGENT_BROWSER_ARGS={before}"])))
+
+                self.assertEqual(done.stdout.strip(), after)
 
     def test_wisp_on_another_machine_applies_no_sandbox_and_warns_nothing(self):
         shutil.rmtree(self.data_dir)
@@ -231,6 +235,19 @@ print(os.environ.get("AGENT_BROWSER_ARGS"))""")
 
         self.assertIn(UNPROTECTED, stderr)
         self.assertIn(str(self.data_dir), stderr)
+
+    @macos
+    def test_a_failed_sandbox_start_leaves_chromes_own_sandbox_on(self):
+        for before in ([], ["AGENT_BROWSER_ARGS=--lang=de"]):
+            with self.subTest(before=before):
+                done = self.python("""
+import os
+load_plugin()
+print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARGS", *before,
+                 "sandbox-exec", "-p", "(version 1)(allow default)"))
+
+                self.assertIn(UNPROTECTED, done.stderr)
+                self.assertEqual(done.stdout.strip(), "--lang=de" if before else "None")
 
     @linux
     @sandboxed
@@ -1304,6 +1321,22 @@ class SandboxModule(unittest.TestCase):
             return self.sandbox._child_pid(read)
         finally:
             os.close(read)
+
+    def browser_args_after_apply(self, platform, before):
+        """`AGENT_BROWSER_ARGS` after `apply` on `platform` with no bubblewrap, from `before` (None: unset)."""
+        with patch.object(sys, "platform", platform), patch.object(self.sandbox, "BWRAP", "/nonexistent/bwrap"), \
+                patch.dict(os.environ):
+            os.environ.pop("AGENT_BROWSER_ARGS", None)
+            if before is not None:
+                os.environ["AGENT_BROWSER_ARGS"] = before
+            self.assertIsNotNone(self.sandbox.apply(["/zone/a"], "/zone/plugin", None, []))
+            return os.environ.get("AGENT_BROWSER_ARGS")
+
+    def test_a_linux_without_bubblewrap_and_any_other_platform_leave_chromes_own_sandbox_on(self):
+        for platform in ("linux", "win32", "freebsd14"):
+            for before in (None, "--lang=de"):
+                with self.subTest(platform=platform, before=before):
+                    self.assertEqual(self.browser_args_after_apply(platform, before), before)
 
     def test_bubblewraps_info_names_the_child(self):
         self.assertEqual(self.child_pid(b'{\n    "child-pid": 42,\n    "net-namespace": 1\n}\n'), 42)
