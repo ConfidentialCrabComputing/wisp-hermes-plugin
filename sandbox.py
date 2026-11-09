@@ -265,17 +265,28 @@ def _reexec(denied, plugin_dir, wisp, held):
         return f"wisp sandbox-exec failed: {exc}"
 
 
+def _without_chromes_sandbox():
+    """Chrome's own sandbox cannot start inside ours, so Hermes's browser goes without it: `--no-sandbox` after the
+    user's own Chromium args, which Hermes reads comma-separated. Only once this process runs in Wisp's sandbox:
+    outside it, Chrome's is all that stands between a page that takes the renderer and the user's account."""
+    args = os.environ.get("AGENT_BROWSER_ARGS", "")
+    if "--no-sandbox" not in (arg.strip() for arg in args.split(",")):
+        os.environ["AGENT_BROWSER_ARGS"] = f"{args},--no-sandbox" if args.strip() else "--no-sandbox"
+
+
 def apply(denied, plugin_dir, wisp, held):
     """Sandboxes this process; the reason it could not or left a folder out, or None, never an exception. A second
     `sandbox_init` in one process fails, so a profile cannot be tightened once applied. On Linux `wisp` (the pinned binary,
     else the one on PATH) re-execs it under bubblewrap."""
     if sys.platform not in ("darwin", "linux"):
         return f"no sandbox on {sys.platform}"
-    # Chrome's own sandbox cannot start inside ours.
-    os.environ["AGENT_BROWSER_ARGS"] = "--no-sandbox"
     try:
         if sys.platform == "linux":
-            return _reexec(denied, plugin_dir, wisp, held)
+            # A working start returns here only inside bubblewrap; so can a folder left out of a running sandbox.
+            problem = _reexec(denied, plugin_dir, wisp, held)
+            if _sandboxed([], plugin_dir):
+                _without_chromes_sandbox()
+            return problem
         sandbox_init = ctypes.CDLL(None).sandbox_init
         sandbox_init.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_char_p)]
         error = ctypes.c_char_p()
@@ -283,6 +294,7 @@ def apply(denied, plugin_dir, wisp, held):
             return f"sandbox_init failed: {(error.value or b'').decode(errors='replace')}"
     except Exception as exc:  # noqa: BLE001 — whatever stops the start, Hermes carries on, and says so
         return f"the sandbox could not start: {exc!r}"
+    _without_chromes_sandbox()
     return None
 
 

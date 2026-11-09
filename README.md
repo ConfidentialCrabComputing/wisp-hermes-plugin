@@ -44,6 +44,8 @@ committed code) in every Hermes profile, connects it over loopback, and sandboxe
 - On one machine, the sandbox stops Hermes reading Wisp's zone itself, not a model set on escaping it: anything Hermes
   asks an unsandboxed process to run (an app it opens or scripts, a shell startup file or a tool on PATH it rewrites)
   runs outside the sandbox.
+- Under Wisp's sandbox, Hermes's browser runs without Chrome's own sandbox: Chrome's cannot start inside Wisp's, so the
+  plugin adds `--no-sandbox` to `AGENT_BROWSER_ARGS`. A Hermes that runs without Wisp's sandbox keeps Chrome's.
 - On Linux, `sudo` and other setuid programs do not work inside the sandboxed Hermes: bubblewrap always sets
   `no_new_privs`, as without it any setuid program inside would regain root and undo the sandbox. Run a command that
   needs root outside Hermes.
