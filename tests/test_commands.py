@@ -75,8 +75,9 @@ class Commands(unittest.TestCase):
 
         self.assertIn("Wisp is not signed in.", shown)
 
-    def endpoint(self, answer):
-        """A fake Wisp MCP endpoint whose tools answer `answer`; returns the `tools/call` requests it got."""
+    def endpoint(self, answer, raw=None):
+        """A fake Wisp MCP endpoint whose tools answer `answer`, or the body `raw` whole; returns the `tools/call`
+        requests it got."""
         calls = []
 
         class Mcp(http.server.BaseHTTPRequestHandler):
@@ -92,6 +93,8 @@ class Commands(unittest.TestCase):
                 else:
                     result = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "wisp"}}
                 body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
+                if raw is not None and message["method"] == "tools/call":
+                    body = raw
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Mcp-Session-Id", "m1")
@@ -123,6 +126,13 @@ class Commands(unittest.TestCase):
         self.assertEqual([call for call in calls if call["name"] == "wisp_model"], [{"authorization": f"Bearer {CREDENTIAL}", "name": "wisp_model",
                                   "arguments": {"args": "balanced"}}])
         self.assertIn("Model: balanced (thinking off).", shown)
+
+    def test_wisp_model_on_a_malformed_answer_says_it_failed(self):
+        for body in (b"[]", b"5", b'{"result": "x"}', b'{"result": {"isError": true, "content": "x"}}'):
+            with self.subTest(body=body):
+                self.endpoint(None, raw=body)
+
+                self.assertIn("Wisp's wisp_model failed: ", self.slash("wisp_model", ""))
 
     def test_wisp_model_without_a_connected_endpoint_says_so(self):
         shown = self.slash("wisp_model", "")
