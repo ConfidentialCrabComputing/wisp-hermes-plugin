@@ -17,10 +17,12 @@ CODE_TOOLS = {"terminal": "command", "execute_code": "code"}
 # Between the words of a command, as a shell or a Python argv list (`["hermes", "plugins", ...]`) spells it.
 _SEP = r"[\s'\",]+"
 # Bounded, so a long line repeating "hermes" stays linear: Hermes abandons a slow hook but cannot stop it.
-# ponytail: "hermes" anywhere on the line, so `git log --grep="hermes gateway restart"` is refused too.
+# ponytail: "hermes" anywhere on the line, so `git log --grep="hermes gateway install"` is refused too.
+# A restart passes: this plugin sandboxes Hermes at every start, and a plugin installed with new
+# dependencies loads only after one.
 _SWITCH_OFF = re.compile(
     rf"\bhermes[^\n;|&]{{0,200}}?\b(plugins{_SEP}(disable|remove|rm|uninstall){_SEP}wisp"
-    rf"|config{_SEP}(set|unset){_SEP}plugins|gateway{_SEP}(install|restart))\b")
+    rf"|config{_SEP}(set|unset){_SEP}plugins|gateway{_SEP}install)\b")
 # What `wisp integrate hermes` switches off: a name `hermes config set mcp_servers.<n>` addresses whole.
 _SERVER_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _FILE_URL = re.compile(r"file://[^\s'\"<>]+")

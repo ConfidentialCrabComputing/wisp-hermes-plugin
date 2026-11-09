@@ -95,7 +95,6 @@ class Hook(unittest.TestCase):
             ("terminal", {"command": "hermes config set plugins.enabled '[]'"}),
             ("terminal", {"command": "hermes config unset plugins"}),
             ("terminal", {"command": "hermes gateway install"}),
-            ("terminal", {"command": "hermes gateway restart"}),
             ("execute_code", {"code": "subprocess.run(['hermes', 'plugins', 'disable', 'wisp'])"}),
             ("write_file", {"path": str(self.home / "config.yaml"), "content": "plugins:\n  enabled: []\n"}),
             ("patch", {"path": str(self.home / "config.yaml"), "old_string": "  - wisp\n", "new_string": ""}),
@@ -140,6 +139,8 @@ class Hook(unittest.TestCase):
             ("write_file", {"path": "/home/u/.wispy/a", "content": "x"}),
             ("terminal", {"command": "ls /home/u/bank2 /home/u && hermes plugins list"}),
             ("terminal", {"command": "hermes gateway status"}),
+            # The sandbox comes from this plugin at every start: a restart with it on starts sandboxed again.
+            ("terminal", {"command": "hermes gateway restart"}),
             ("execute_code", {"code": "print(1)"}),
             ("browser_navigate", {"url": "https://example.com/home/u/bank"}),
             ("browser_navigate", {"url": "file:///home/u/public/page.html"}),
@@ -149,7 +150,7 @@ class Hook(unittest.TestCase):
             ("terminal", {"command": "ls /mnt/backup/home/u/bank"}),
             ("read_file", {"path": "a\x00b"}),
             ("browser_type", {"text": "file://[x/y"}),
-        ), [None] * 14)
+        ), [None] * 15)
 
     def test_a_long_line_naming_hermes_is_judged_quickly(self):
         start = time.monotonic()
