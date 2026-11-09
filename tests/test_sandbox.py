@@ -344,6 +344,27 @@ sys.stderr.write(child.stderr)""")
         self.assertNotIn(UNPROTECTED, done.stderr)
 
     @sandboxed
+    def test_a_secret_file_named_with_a_quote_a_backslash_or_a_control_character_is_still_denied_and_nothing_beside_it(self):
+        for name in ('x") (allow file-read* (subpath "', 'a\\b"c', "a\nb\x01c"):
+            with self.subTest(name=name):
+                secret = self.tmp / name
+                secret.write_text("secret")
+                beside = self.tmp / "beside.txt"
+                beside.write_text("beside")
+                self.zone["secretFiles"] = [str(secret)]
+
+                # On Linux the file reads as the empty `/dev/null` over it.
+                done = self.python(f"""
+load_plugin()
+try:
+    print(repr(open({str(secret)!r}).read()))
+except OSError:
+    print("refused")""")
+
+                self.assertIn(done.stdout.strip(), ("refused", "''"), done.stderr)
+                self.assertTrue(self.readable(beside))
+
+    @sandboxed
     def test_a_private_folder_named_with_a_quote_and_a_backslash_is_still_denied_and_nothing_beside_it(self):
         for name in ('x") (allow file-read* (subpath "', 'a\\b"c'):
             with self.subTest(name=name):
