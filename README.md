@@ -41,6 +41,9 @@ committed code) in every Hermes profile, connects it over loopback, and sandboxe
 - Hermes's model can read the credential from its terminal's environment, so it can call the endpoint outside Hermes.
 - On one machine, Hermes's model can switch the plugin off and restart Hermes, which is neither prevented nor detected
   at run time.
+- On one machine, a server moved into Wisp stays out of Hermes only while its keys are gone from Hermes: its entries in
+  the profile's `.env` and `mcp-tokens/<server>.json` in the profile's home. A model set on it can switch the server
+  back on past the hook's text checks.
 - On one machine, the sandbox stops Hermes reading Wisp's zone itself, not a model set on escaping it: anything Hermes
   asks an unsandboxed process to run (an app it opens or scripts, a shell startup file or a tool on PATH it rewrites)
   runs outside the sandbox.

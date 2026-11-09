@@ -76,9 +76,6 @@ def make_hook(zone, config_path, moved=()):
     config = str(config_path)
     config_named = _naming([config])
     servers = _moved_names(moved)
-    # ponytail: Hermes names an MCP server's tools `mcp_<server>_<tool>`, the server's other characters
-    # as `_`; a tool name spelled otherwise passes.
-    tool_prefixes = tuple(f"mcp_{re.sub(r'[^A-Za-z0-9_]', '_', name)}_" for name in servers)
     either = "|".join(map(re.escape, servers))
     # Switching a moved server back on, or replacing it, through Hermes's own CLI.
     switch_on = re.compile(
@@ -98,8 +95,6 @@ def make_hook(zone, config_path, moved=()):
         return any(real == folder or real.startswith(folder + os.sep) for folder in among)
 
     def pre_tool_call(tool_name, args, **_):
-        if tool_prefixes and tool_name.startswith(tool_prefixes):
-            return REFUSAL
         if tool_name in FILE_TOOLS:
             path = args.get("path")
             if isinstance(path, str) and (inside(path, folders) or (
