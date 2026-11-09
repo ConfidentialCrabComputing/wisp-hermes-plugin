@@ -33,6 +33,41 @@ sandbox and no `wisp doctor` here.
 Don't install from here: `wisp integrate hermes` lays out the copy embedded in the `wisp` binary (this repository's
 committed code) in every Hermes profile, connects it over loopback, and sandboxes Hermes away from Wisp's zone.
 
+### Asked from a chat
+
+When the user asks Hermes in a chat (Telegram, Slack) to install Wisp or this plugin, Hermes runs these steps itself,
+in its terminal. There is no terminal for the installer to ask its questions on, so they are answered up front:
+
+1. Install Wisp and start it as a background service:
+
+   ```sh
+   curl -fsSL https://usewisp.io/runtime/install.sh | WISP_SERVICE=1 sh
+   ```
+
+2. Sign in. Start the login as a background process: it prints a URL and waits for a line on stdin.
+
+   ```sh
+   ~/.wisp/bin/wisp login --manual
+   ```
+
+   Send the URL to the user, ask them to sign in and to send back the URL their browser lands on, then write that URL
+   to the process's stdin.
+
+3. Wire Wisp into Hermes, without the question about moving MCP servers:
+
+   ```sh
+   ~/.wisp/bin/wisp integrate hermes --skip-connectors
+   ```
+
+4. Restart the gateway, which loads the plugin and its sandbox:
+
+   ```sh
+   hermes gateway restart
+   ```
+
+`~/.wisp/bin` reaches `PATH` only in new shells, hence the full path. Hermes's MCP servers can be moved into Wisp later,
+from a terminal, with `wisp integrate hermes --connectors`.
+
 ## Known limits
 
 - Whoever holds the credential is Hermes: a prompt-injected Hermes can approve Wisp's Confirmation Prompts itself. It
