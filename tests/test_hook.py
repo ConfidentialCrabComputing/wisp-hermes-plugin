@@ -104,22 +104,23 @@ class Hook(unittest.TestCase):
             ("patch", {"mode": "patch", "patch": f"*** Update File: {self.home / 'config.yaml'}\n"}),
         )
 
-    def test_a_call_to_a_server_moved_into_wisp_and_switching_it_back_on_are_blocked(self):
+    def test_switching_a_server_moved_into_wisp_back_on_is_blocked(self):
         # `wisp integrate hermes` records the servers it switched off beside the plugin.
         (self.home / "plugins" / "wisp" / "moved.json").write_text(json.dumps(["notes", "my-crm"]))
 
         self.assertBlocked(
-            ("mcp_notes_search", {"query": "x"}),
-            ("mcp_my_crm_list_deals", {}),
             ("terminal", {"command": "hermes config set mcp_servers.notes.enabled true"}),
             ("terminal", {"command": "hermes config unset mcp_servers.my-crm.enabled"}),
             ("terminal", {"command": "hermes mcp remove notes"}),
             ("terminal", {"command": f"sed -i 's/enabled: false/enabled: true/' {self.home / 'config.yaml'} # notes"}),
         )
+        # The hook does not judge a moved server's tools: without its keys, a server switched back on
+        # cannot sign in.
         self.assertEqual(self.verdicts(
-            ("mcp_notebook_search", {}),
+            ("mcp__notes__search", {"query": "x"}),
+            ("mcp_my_crm_list_deals", {}),
             ("terminal", {"command": "hermes config set mcp_servers.notebook.enabled true"}),
-        ), [None, None])
+        ), [None, None, None])
 
     def test_switch_off_attempts_are_blocked_even_with_no_zone(self):
         (self.home / "plugins" / "wisp" / "zone.json").unlink()
