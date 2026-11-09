@@ -5,6 +5,7 @@ cannot borrow Hermes's client. Standard library only. ponytail: no elicitation a
 only `ask_wisp` and `wisp_result` need; Hermes's own client makes those calls."""
 
 import json
+import time
 import urllib.request
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -28,8 +29,15 @@ class McpError(Exception):
 
 def call_tool(url, credential, name, arguments=None, timeout=5.0):
     """The `CallToolResult` of tool `name`; raises `McpError` for a refusal or a tool error and `OSError`
-    when the endpoint cannot be reached."""
+    when the endpoint cannot be reached, or `TimeoutError` when the whole call outlasts `timeout`."""
     session = {}
+    deadline = time.monotonic() + timeout
+
+    def left():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"{name} took longer than {timeout:g} s")
+        return remaining
 
     def send(message, method="POST"):
         headers = {"Authorization": f"Bearer {credential}", "Accept": "application/json, text/event-stream"}
@@ -40,24 +48,24 @@ def call_tool(url, credential, name, arguments=None, timeout=5.0):
             headers["Content-Type"] = "application/json"
             data = json.dumps(message).encode()
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        with _open(request, timeout=timeout) as response:
+        with _open(request, timeout=left()) as response:
             if "id" not in session and response.headers.get("Mcp-Session-Id"):
                 session["id"] = response.headers["Mcp-Session-Id"]
             if message is None or "id" not in message:
                 return None
-            return _answer(response, message["id"])
+            return _answer(response, message["id"], left)
 
-    initialized = send({
+    initialized = _object(send({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
                    "clientInfo": {"name": "wisp-hermes-plugin", "version": "1"}},
-    })
+    }), "initialize's answer")
     if "result" not in initialized:
         raise McpError(f"initialize refused: {initialized.get('error')}")
     try:
         send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        called = send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                       "params": {"name": name, "arguments": arguments or {}}})
+        called = _object(send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                               "params": {"name": name, "arguments": arguments or {}}}), f"{name}'s answer")
     finally:
         if session:
             try:
@@ -66,21 +74,49 @@ def call_tool(url, credential, name, arguments=None, timeout=5.0):
                 pass
     if "result" not in called:
         raise McpError(f"{name} refused: {called.get('error')}")
-    result = called["result"]
+    result = _object(called["result"], f"{name}'s result")
+    content = result.get("content", [])
+    if not isinstance(content, list) or not all(isinstance(c, dict) for c in content):
+        raise McpError(f"{name}'s content is not a list of objects")
     if result.get("isError"):
-        raise McpError(" ".join(c.get("text", "") for c in result.get("content", [])) or f"{name} failed")
+        raise McpError(" ".join(c.get("text", "") for c in content) or f"{name} failed")
     return result
 
 
-def _answer(response, request_id):
+def _object(value, what):
+    if not isinstance(value, dict):
+        raise McpError(f"{what} is not an object")
+    return value
+
+
+def _chunks(response, left):
+    """The body as it arrives, `left()` checked before each read. ponytail: a stalled read is bounded only by the socket
+    timeout `left()` gave at the open (up to twice `timeout` in all), and headers dripped byte by byte not at all; a
+    thread per call would bound both, if an endpoint ever does that."""
+    while True:
+        left()
+        if not (chunk := response.read1(65536)):
+            return
+        yield chunk
+
+
+def _lines(response, left):
+    rest = b""
+    for chunk in _chunks(response, left):
+        *lines, rest = (rest + chunk).split(b"\n")
+        yield from lines
+    yield rest
+
+
+def _answer(response, request_id, left):
     """The JSON-RPC response to `request_id`, from a JSON body or an SSE stream (skipping the server's
     own requests and notifications)."""
     if response.headers.get_content_type() == "application/json":
-        return json.load(response)
-    for line in response:
+        return json.loads(b"".join(_chunks(response, left)))
+    for line in _lines(response, left):
         if not line.startswith(b"data:"):
             continue
         message = json.loads(line[5:])
-        if "method" not in message and message.get("id") == request_id:
+        if isinstance(message, dict) and "method" not in message and message.get("id") == request_id:
             return message
     raise McpError("the endpoint closed the stream without an answer")

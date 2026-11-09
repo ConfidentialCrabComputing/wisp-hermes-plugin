@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -18,6 +19,8 @@ PLUGIN = Path(__file__).resolve().parents[1]
 SECTION_CAP = 4000
 ZONE = {"dataDir": "/home/u/.wisp", "deskRoot": "/home/u/.wisp/desks",
         "privateFolders": [{"path": "/home/u/bank"}], "services": ["gmail"]}
+# Answers to `tools/call` that are no `CallToolResult`.
+MALFORMED = (b"[]", b"5", b'{"result": "x"}', b'{"result": {"isError": true, "content": "x"}}')
 
 
 @unittest.skipIf(sys.platform == "win32", "POSIX paths throughout, which are not absolute on Windows")
@@ -32,7 +35,7 @@ class Rule(unittest.TestCase):
         (self.home / "config.yaml").write_text(json.dumps(self.config))
         env = {key: value for key, value in os.environ.items() if key.lower() != "no_proxy"}
         env.update(HERMES_HOME=str(self.home), PATH=f"{FAKE}{os.pathsep}{os.environ['PATH']}", **extra_env)
-        done = subprocess.run(["hermes", *argv], env=env, capture_output=True, text=True)
+        done = subprocess.run(["hermes", *argv], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout
 
@@ -75,6 +78,69 @@ class Rule(unittest.TestCase):
             with self.subTest(zone=zone):
                 self.assertIsNone(self.rule(zone))
                 self.assertIn("--remove", self.hermes("wisp", "connect", "--help"))
+
+    def endpoint(self, answer):
+        """A Wisp endpoint that initializes, then answers `tools/call` through `answer(handler)`."""
+        class Mcp(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if message.get("method") == "tools/call":
+                    return answer(self)
+                if "id" not in message:
+                    body = b""
+                else:
+                    body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {
+                        "protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "wisp"}}}).encode()
+                self.send_response(200 if body else 202)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Mcp)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.config["mcp_servers"] = {"wisp": {"url": f"http://127.0.0.1:{server.server_address[1]}/mcp"}}
+        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
+
+    def test_an_endpoint_that_never_finishes_its_answer_leaves_the_cached_zone_within_the_limit(self):
+        def drip(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            try:
+                while True:
+                    handler.wfile.write(b": keep\n")
+                    handler.wfile.flush()
+                    time.sleep(0.5)
+            except OSError:
+                pass
+
+        self.endpoint(drip)
+
+        started = time.monotonic()
+        rule = self.rule(ZONE)
+
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn("/home/u/bank", rule)
+
+    def test_a_malformed_answer_leaves_the_cached_zone(self):
+        for body in MALFORMED:
+            with self.subTest(body=body):
+                def malformed(handler):
+                    handler.send_response(200)
+                    handler.send_header("Content-Type", "application/json")
+                    handler.send_header("Content-Length", str(len(body)))
+                    handler.end_headers()
+                    handler.wfile.write(body)
+
+                self.endpoint(malformed)
+
+                self.assertIn("/home/u/bank", self.rule(ZONE))
 
     def test_the_zone_call_to_a_loopback_endpoint_never_goes_through_a_proxy(self):
         proxied = []
