@@ -10,7 +10,7 @@ On the Runtime's machine, make the credential (printed once) and put https in fr
 `127.0.0.1` as always (Tailscale Serve, Caddy), or keep an `ssh -L` as a service on Hermes's machine:
 
 ```sh
-wisp tokens create hermes --host-agent
+wisp tokens create --name hermes --host-agent
 ```
 
 On Hermes's machine, install the plugin and connect it. `connect` reads the credential from stdin, without echo:

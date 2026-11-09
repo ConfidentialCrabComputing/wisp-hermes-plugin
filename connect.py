@@ -83,7 +83,7 @@ def _read_credential():
     credential = getpass.getpass("Wisp credential: ") if sys.stdin.isatty() else sys.stdin.readline()
     credential = credential.strip()
     if not credential:
-        sys.exit("No credential given: paste the one `wisp tokens create <name> --host-agent` printed.")
+        sys.exit("No credential given: paste the one `wisp tokens create --name <name> --host-agent` printed.")
     return credential
 
 
