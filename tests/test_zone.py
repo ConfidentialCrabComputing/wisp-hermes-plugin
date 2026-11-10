@@ -357,6 +357,14 @@ while time.monotonic() < deadline and not os.path.exists({str(reconnects)!r}):
 
         self.assertEqual(reconnects.read_text(), "wisp\n")
 
+    def test_plugins_loaded_again_in_a_running_hermes_still_reconnect_wisp_from_one_thread(self):
+        # Hermes loads every plugin again in its process on a forced rediscovery (an install, a reload).
+        threads = self.hermes("python", """load_plugin(); load_plugin(); load_plugin()
+import threading
+print(sum(thread.name == "wisp-revive" for thread in threading.enumerate()))""")
+
+        self.assertEqual(threads.strip(), "1")
+
     def test_the_zone_call_to_a_loopback_endpoint_never_goes_through_a_proxy(self):
         proxied = []
 

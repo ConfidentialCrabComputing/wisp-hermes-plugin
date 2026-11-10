@@ -172,4 +172,6 @@ def register(ctx):
         logger.warning("Wisp: the hook guards no zone, it is malformed: %r", exc)
         hook = make_hook(None, config_path, unavailable=unavailable)
     ctx.register_hook("pre_tool_call", hook)
-    threading.Thread(target=revive, name="wisp-revive", daemon=True).start()
+    # Once per process: a forced rediscovery loads every plugin again, a fresh module each time, in the same process.
+    if not any(thread.name == "wisp-revive" for thread in threading.enumerate()):
+        threading.Thread(target=revive, name="wisp-revive", daemon=True).start()
