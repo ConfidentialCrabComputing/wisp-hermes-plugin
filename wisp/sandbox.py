@@ -36,16 +36,19 @@ def _ancestors(path):
 
 def profile(denied, plugin_dir):
     """The Seatbelt profile: everything allowed but the zone and writes to the plugin. A rule names a path,
-    so renaming a folder's parent would carry it out from under its rule: each parent itself (`literal`) is
-    denied only being renamed or removed. Not `file-write*`, which Seatbelt also answers `access(W_OK)` from:
-    Hermes would take its own home for read-only, and its `chmod` of it would fail."""
+    so whatever takes a folder out from under that path takes it out from under its rule. Each parent itself
+    (`literal`) is denied only those: `file-write-unlink`, being renamed or removed; `file-clone`, being
+    copied whole by `clonefile`, which never checks a read of what is inside; `file-write-create`, being
+    made before Wisp makes it, as a link elsewhere that every later write under the path would follow.
+    Not `file-write*`, which Seatbelt also answers `access(W_OK)` from, so Hermes would take its own home
+    for read-only, and not `file-write-mode`, so its `chmod` of its home keeps working."""
     parents = sorted({parent for path in [*denied, plugin_dir] for parent in _ancestors(path)})
     return "\n".join([
         "(version 1)",
         "(allow default)",
         *(f"(deny file-read* file-write* (subpath {_literal(path)}))" for path in denied),
         f"(deny file-write* (subpath {_literal(plugin_dir)}))",
-        *(f"(deny file-write-unlink (literal {_literal(parent)}))" for parent in parents),
+        *(f"(deny file-write-unlink file-clone file-write-create (literal {_literal(parent)}))" for parent in parents),
         "",
     ])
 

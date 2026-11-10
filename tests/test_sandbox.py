@@ -219,6 +219,46 @@ for old, new in (({str(parent)!r}, {str(self.tmp / "docs2")!r}), ({str(self.tmp)
         self.assertEqual(done.stdout.split(), ["refused", "refused"])
 
     @macos
+    def test_a_zone_folder_cannot_be_read_through_a_clone_of_its_parent_or_grandparent(self):
+        parent = self.tmp / "docs"
+        parent.mkdir()
+        self.bank.rename(parent / "bank")
+        self.zone["privateFolders"] = [{"path": str(parent / "bank")}]
+        elsewhere = Path(os.path.realpath(tempfile.mkdtemp(prefix="wisp-hermes-clone-")))
+        self.addCleanup(shutil.rmtree, elsewhere)
+
+        # APFS's `clonefile` copies a whole tree in the kernel, without a read of what is inside.
+        done = self.python(f"""
+import ctypes, os
+load_plugin()
+libc = ctypes.CDLL(None, use_errno=True)
+for source, clone in (({str(parent)!r}, {str(elsewhere / "docs")!r}), ({str(self.tmp)!r}, {str(elsewhere / "tmp")!r})):
+    print("cloned" if libc.clonefile(source.encode(), clone.encode(), 0) == 0 else "refused")""")
+
+        self.assertEqual(done.stdout.split(), ["refused", "refused"], done.stderr)
+        self.assertEqual(list(elsewhere.rglob("secret.txt")), [])
+
+    @macos
+    def test_a_missing_ancestor_of_a_zone_folder_cannot_be_made_by_the_sandboxed_hermes(self):
+        self.zone["privateFolders"].append({"path": str(self.tmp / "m" / "n" / "taxes")})
+        elsewhere = Path(os.path.realpath(tempfile.mkdtemp(prefix="wisp-hermes-plant-")))
+        self.addCleanup(shutil.rmtree, elsewhere)
+
+        # One Hermes each: what the first made would stand in the second's way, and nothing inside can remove it.
+        for make in (f"os.mkdir({str(self.tmp / 'm')!r})", f"os.symlink({str(elsewhere)!r}, {str(self.tmp / 'm')!r})"):
+            done = self.python(f"""
+import os
+load_plugin()
+try:
+    {make}
+    print("made")
+except OSError:
+    print("refused")""")
+
+            self.assertEqual(done.stdout.split(), ["refused"], make + done.stderr)
+            self.assertFalse(os.path.lexists(self.tmp / "m"))
+
+    @macos
     def test_a_parent_the_sandbox_keeps_in_place_answers_access_chmod_and_new_files_as_without_it(self):
         # Empty, as an absent Private Folder's parent can be: only the sandbox stands between it and an `rmdir`.
         empty = self.tmp / "empty"
