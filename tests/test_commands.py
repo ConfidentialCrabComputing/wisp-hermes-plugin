@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 FAKE = Path(__file__).resolve().parent / "fake"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 CREDENTIAL = "wisp_hermes_s3cr3t"
 
 
@@ -32,7 +32,7 @@ class Commands(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-commands-"))
         self.addCleanup(shutil.rmtree, self.home)
-        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
+        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
         self.config = {"plugins": {"enabled": ["wisp"]}}
 
     def slash(self, name, args, tools=None):

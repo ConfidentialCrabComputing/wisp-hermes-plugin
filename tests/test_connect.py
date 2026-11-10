@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 FAKE = Path(__file__).resolve().parent / "fake"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 CREDENTIAL = "wisp_hermes_s3cr3t-credential"
 URL = "https://wisp.example.ts.net/mcp"
 # Hermes loads the plugin, and so has `hermes wisp`, only once `plugins.enabled` lists it.
@@ -29,7 +29,7 @@ class ConnectDecides(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-"))
         self.addCleanup(shutil.rmtree, self.home)
         plugin = self.home / "plugins" / "wisp"
-        shutil.copytree(PLUGIN, plugin, ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
+        shutil.copytree(PLUGIN, plugin, ignore=shutil.ignore_patterns("__pycache__"))
         (self.home / "config.yaml").write_text(json.dumps(ENABLED))
         for patch in (mock.patch.dict(os.environ, HERMES_HOME=str(self.home)), mock.patch.dict(sys.modules),
                       mock.patch.object(sys, "path", [str(FAKE), *sys.path])):
@@ -79,7 +79,7 @@ class Connect(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-"))
         self.addCleanup(shutil.rmtree, self.home)
-        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
+        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
         self.write_config(ENABLED)
 
     def write_config(self, config):

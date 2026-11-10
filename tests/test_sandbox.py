@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 FAKE = Path(__file__).resolve().parent / "fake"
 WISP = Path(__file__).resolve().parent / "wisp-from-source"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 UNPROTECTED = "Wisp's zone is unprotected"
 macos = unittest.skipUnless(sys.platform == "darwin", "the macOS sandbox")
 linux = unittest.skipUnless(sys.platform == "linux", "the Linux sandbox")
@@ -70,7 +70,7 @@ class HermesHome(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.home = self.tmp / "hermes"
         self.plugin = self.home / "plugins" / "wisp"
-        shutil.copytree(PLUGIN, self.plugin, ignore=shutil.ignore_patterns("__pycache__", "zone.json", ".git", "tests"))
+        shutil.copytree(PLUGIN, self.plugin, ignore=shutil.ignore_patterns("__pycache__", "zone.json"))
         (self.home / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["wisp"]}}))
         self.data_dir = self.tmp / "wisp"
         self.bank = self.tmp / "bank"
