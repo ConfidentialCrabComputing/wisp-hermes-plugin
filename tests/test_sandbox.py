@@ -1289,6 +1289,21 @@ except OSError:
                 self.assertEqual(done.stdout.split(), ["refused"], done.stderr)
                 self.assertIn(f"{UNPROTECTED}: {folder}", done.stderr)
 
+    @sandboxed
+    def test_a_pinned_folder_holding_a_folder_hermes_imports_from_is_left_out_saying_so(self):
+        # As a Hermes whose interpreter lies in one place and its packages, on `sys.path` only, in another.
+        environment = self.tmp / "environment"
+        packages = environment / "lib" / "site-packages"
+        packages.mkdir(parents=True)
+        (packages / "imported_late.py").write_text("")
+        self.fault_env["PYTHONPATH"] = str(packages)
+        self.pin["privateFolders"] = [{"path": str(self.bank)}, {"path": str(environment)}]
+
+        done = self.python(READ_THE_SECRETS.format(paths=[str(self.bank / "secret.txt")]) + "\nimport imported_late\nprint('imported')")
+
+        self.assertEqual(done.stdout.split(), ["refused", "imported"], done.stderr)
+        self.assertIn(f"{UNPROTECTED}: {environment} would take {packages}", done.stderr)
+
     def test_with_no_pin_an_answer_is_cached_as_it_came(self):
         # A second machine's: its Wisp may name folders in another machine's terms.
         self.pin = None
