@@ -13,7 +13,8 @@ names that file, and
 `FAKE_HERMES_FAILS` (an argv joined by spaces) one that exits non-zero on that command. `hermes slash <name> [args]` (not Hermes's) runs a plugin slash command's handler
 looked up as the CLI does (the name as typed), `hermes message <name> [args]` (not Hermes's) as a gateway
 does for a message (`gateway/run_inbound_hooks.py`: the name with `_` made `-`), and prints what it
-returns, or "Unknown command /<name>"; its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
+returns, or "Unknown command /<name>" (`ctx.session_surface()` is `cli` for one, `telegram` for the other,
+and `ctx.ask_choice` logs to `$HERMES_HOME/choices.log` and picks the label `FAKE_HERMES_CHOICE`); its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
 answered, in order, from `$HERMES_HOME/tools.json` ({tool: [handler result, ...]}), as Hermes's registry
 would answer them (a JSON string)."""
 
@@ -43,6 +44,8 @@ HOME = Path(os.environ["HERMES_HOME"])
 # Where `hermes plugins install` (or `wisp integrate hermes`) lays the plugin out.
 PLUGIN = HOME / "plugins" / "wisp"
 CONFIG = HOME / "config.yaml"
+# `ctx.session_surface()`: the classic CLI for `slash`, Telegram for `message`, "" outside a session.
+SURFACE = ""
 
 
 def config():
@@ -121,6 +124,21 @@ class Ctx:
 
     def register_hook(self, hook_name, callback, *, hold_stream=False):
         self.hooks.setdefault(hook_name, []).append(callback)
+
+    def session_surface(self):
+        return SURFACE
+
+    def ask_choice(self, question, choices):
+        # As Hermes's `plugin_choices.ask_choice`: the user taps a label (`FAKE_HERMES_CHOICE`; unset, nobody
+        # answers), and the value of the choice it names comes back.
+        with open(HOME / "choices.log", "a") as log:
+            log.write(json.dumps([question, choices]) + "\n")
+        typed = os.environ.get("FAKE_HERMES_CHOICE", "").strip().casefold()
+        for choice in choices:
+            value, label = (choice, choice) if isinstance(choice, str) else (choice["value"], choice.get("label") or choice["value"])
+            if typed and typed in (str(value).casefold(), str(label).casefold()):
+                return value
+        return None
 
 
 def pre_tool_call(ctx, tool_name, args):
@@ -273,6 +291,8 @@ def main(argv):
         config_get(argv[2])
     elif argv[:1] in (["slash"], ["message"]) and len(argv) in (2, 3):
         name = argv[1] if argv[0] == "slash" else argv[1].replace("_", "-")
+        global SURFACE
+        SURFACE = "cli" if argv[0] == "slash" else "telegram"
         handler = load_plugin().commands.get(name)
         print(handler(argv[2] if len(argv) == 3 else "") if handler else f"Unknown command /{argv[1]}")
     elif argv == ["sections"]:

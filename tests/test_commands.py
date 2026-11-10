@@ -2,6 +2,7 @@
 `hermes`. Run: python3 -m unittest discover -s tests"""
 
 import http.server
+import itertools
 import json
 import os
 import shutil
@@ -23,6 +24,11 @@ def answered(text, conversation="s1"):
             "structuredContent": {"answer": text, "conversation": conversation}}
 
 
+def text(answer, **structured):
+    """A `CallToolResult` as Wisp's endpoint sends it."""
+    return {"content": [{"type": "text", "text": answer}], **({"structuredContent": structured} if structured else {})}
+
+
 def running(run, conversation="s1"):
     return {"result": f"Wisp is still at work on it (run: {run}). Call wisp_result with run {run} for its answer.",
             "structuredContent": {"run": run, "conversation": conversation}}
@@ -35,10 +41,13 @@ class Commands(unittest.TestCase):
         shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
         self.config = {"plugins": {"enabled": ["wisp"]}}
 
-    def hermes(self, *argv, tools=None):
+    def hermes(self, *argv, tools=None, choice=None):
         (self.home / "config.yaml").write_text(json.dumps(self.config))
         (self.home / "tools.json").write_text(json.dumps(tools or {}))
         env = {**os.environ, "HERMES_HOME": str(self.home), "PATH": f"{FAKE}{os.pathsep}{os.environ['PATH']}"}
+        env.pop("FAKE_HERMES_CHOICE", None)
+        if choice is not None:
+            env["FAKE_HERMES_CHOICE"] = choice
         # By its interpreter: Windows does not start a script through its shebang.
         done = subprocess.run([sys.executable, str(FAKE / "hermes"), *argv], env=env, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -48,9 +57,9 @@ class Commands(unittest.TestCase):
         """`/<name> args` typed in the CLI."""
         return self.hermes("slash", name, args, tools=tools)
 
-    def message(self, name, args):
-        """`/<name> args` sent to a gateway (Telegram, Slack, ...)."""
-        return self.hermes("message", name, args)
+    def message(self, name, args, choice=None):
+        """`/<name> args` sent to a gateway (Telegram, Slack, ...); `choice` is the button the user taps when asked."""
+        return self.hermes("message", name, args, choice=choice)
 
     def test_every_command_is_found_on_every_surface(self):
         names = json.loads(self.hermes("python", "import json; print(json.dumps(list(load_plugin().commands)))"))
@@ -136,6 +145,117 @@ class Commands(unittest.TestCase):
         self.config["mcp_servers"] = {"wisp": {"url": f"http://127.0.0.1:{server.server_address[1]}/mcp"}}
         (self.home / ".env").write_text(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}\n")
         return calls
+
+    def asking_endpoint(self, answers):
+        """A fake Wisp MCP endpoint as Wisp's is over Streamable HTTP: each `tools/call` is answered on its own SSE
+        stream, in order, from `answers[tool]`: a `CallToolResult`, or for a call that parks on a Confirmation a
+        function of the elicitation's action, asked after a ping, and only of a client that declared elicitation
+        (else the function gets None, as Wisp's Run then runs under `policy`). Returns the client's answers to the
+        endpoint's own requests, by id, and logs the calls to `calls`."""
+        replies, calls, declared = {}, [], {}
+        replied = threading.Condition()
+        ids = itertools.count(1)
+
+        class Mcp(http.server.BaseHTTPRequestHandler):
+            def event(self, message):
+                self.wfile.write(b"data: " + json.dumps(message).encode() + b"\n\n")
+                self.wfile.flush()
+
+            def do_POST(self):
+                message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if "method" not in message or "id" not in message:
+                    with replied:
+                        if "method" not in message:
+                            replies[message["id"]] = message
+                        replied.notify_all()
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                if message["method"] == "initialize":
+                    session = f"m{next(ids)}"
+                    declared[session] = message["params"]["capabilities"]
+                    body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {
+                        "protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "wisp"}}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Mcp-Session-Id", session)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                params = message["params"]
+                calls.append([params["name"], params["arguments"]])
+                # The plugin's load asks `wisp_zone` too.
+                answer = (answers.get(params["name"]) or [{"content": []}]).pop(0)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                if callable(answer):
+                    action = None
+                    if "elicitation" in declared.get(self.headers["Mcp-Session-Id"], {}):
+                        ping, ask = f"p{next(ids)}", f"e{next(ids)}"
+                        self.event({"jsonrpc": "2.0", "id": ping, "method": "ping"})
+                        self.event({"jsonrpc": "2.0", "id": ask, "method": "elicitation/create", "params": {
+                            "message": "Run bash_run: echo tg-ok", "requestedSchema": {"type": "object", "properties": {}}}})
+                        with replied:
+                            replied.wait_for(lambda: ask in replies and ping in replies, timeout=10)
+                        action = ((replies.get(ask) or {}).get("result") or {}).get("action")
+                    answer = answer(action)
+                self.event({"jsonrpc": "2.0", "id": message["id"], "result": answer})
+
+            def do_DELETE(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Mcp)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.config["mcp_servers"] = {"wisp": {"url": f"http://127.0.0.1:{server.server_address[1]}/mcp"}}
+        (self.home / ".env").write_text(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}\n")
+        self.calls = calls
+        return replies
+
+    def asked(self):
+        try:
+            return [json.loads(line) for line in (self.home / "choices.log").read_text().splitlines()]
+        except OSError:
+            return []
+
+    def test_wisp_on_a_gateway_asks_its_confirmation_in_the_chat_and_allow_runs_it(self):
+        replies = self.asking_endpoint({"ask_wisp": [
+            lambda action: text("tg-ok" if action == "accept" else f"Denied ({action}): bash_run")]})
+
+        shown = self.message("wisp", "Run in your bash exactly: echo tg-ok", choice="Allow for this task")
+
+        self.assertEqual([question for question, _choices in self.asked()], ["Run bash_run: echo tg-ok"])
+        self.assertIn("tg-ok", shown)
+        self.assertEqual([r["result"] for r in replies.values() if "action" not in r["result"]], [{}])  # the ping's
+
+    def test_wisp_on_a_gateway_refuses_on_deny_and_never_reports_an_unanswered_confirmation_as_a_decline(self):
+        for choice, action in (("Deny", "decline"), (None, "cancel")):
+            with self.subTest(choice=choice):
+                self.asking_endpoint({"ask_wisp": [lambda action: text(f"Not run ({action}): bash_run")]})
+
+                shown = self.message("wisp", "Run in your bash exactly: echo tg-ok", choice=choice)
+
+                self.assertIn(f"Not run ({action}): bash_run", shown)
+
+    def test_wisp_on_a_gateway_asks_wisp_result_until_the_answer(self):
+        self.asking_endpoint({"ask_wisp": [text("still at work", run="r1")],
+                              "wisp_result": [text("still at work", run="r1"), text("Three bills are due.")]})
+
+        shown = self.message("wisp", "summarise my mail")
+
+        self.assertEqual([call for call in self.calls if call[0] != "wisp_zone"], [
+            ["ask_wisp", {"task": "summarise my mail"}], ["wisp_result", {"run": "r1"}], ["wisp_result", {"run": "r1"}]])
+        self.assertIn("Three bills are due.", shown)
+
+    def test_wisp_on_a_gateway_without_a_connected_endpoint_says_so(self):
+        self.assertIn("hermes wisp connect", self.message("wisp", "summarise my mail"))
 
     def test_wisp_model_calls_the_endpoints_wisp_model_with_its_args_and_shows_its_answer(self):
         calls = self.endpoint("Model: balanced (thinking off).")
