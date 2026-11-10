@@ -74,6 +74,23 @@ class ConnectDecides(unittest.TestCase):
                 self.assertNotIn(CREDENTIAL, json.dumps(argvs))
                 self.assertIn(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}", (self.home / ".env").read_text())
 
+    def test_remove_says_nothing_of_a_zone_cache_its_sandbox_refuses_to_delete(self):
+        cache = self.home / "plugins" / "wisp" / "zone.json"
+        cache.write_text("{}")
+        unlink = Path.unlink
+
+        def refused(path, missing_ok=False):
+            if path.resolve() == cache.resolve():
+                raise PermissionError(1, "Operation not permitted", str(path))
+            unlink(path, missing_ok=missing_ok)
+
+        out = io.StringIO()
+        with mock.patch.object(Path, "unlink", refused), contextlib.redirect_stdout(out):
+            self.plugin.remove()
+
+        self.assertNotIn("zone", out.getvalue().lower())
+        self.assertTrue(cache.exists())
+
 
 class Connect(unittest.TestCase):
     def setUp(self):

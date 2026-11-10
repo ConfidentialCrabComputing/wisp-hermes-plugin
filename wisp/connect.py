@@ -194,9 +194,10 @@ def remove():
     prior_path.unlink(missing_ok=True)
     try:
         ZONE_CACHE.unlink(missing_ok=True)
-    except OSError as exc:
-        # Wisp's sandbox denies Hermes writes beside the plugin, so it cannot be altered from inside.
-        print(f"Could not delete the zone cache {ZONE_CACHE} ({exc.strerror}); delete it from outside Hermes")
+    except OSError:
+        # Wisp's sandbox denies Hermes writes beside the plugin; the file goes with the plugin's directory,
+        # which `wisp integrate hermes --remove` deletes from outside, so there is nothing to tell the user.
+        pass
 
 
 def _restorable(value):
