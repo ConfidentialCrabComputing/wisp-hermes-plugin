@@ -67,8 +67,9 @@ def make_hook(zone, config_path, moved=(), unconnected=lambda: None):
     given = ([zone["dataDir"], zone["deskRoot"], *(f["path"] for f in zone.get("privateFolders") or []),
               *(zone.get("secretFiles") or [])] if zone else [])
     home = os.path.expanduser("~")
-    # zone.json is writable by Hermes's model: an empty, relative, root or home folder would refuse nearly
-    # every call, on every start the cache stands in for the Runtime.
+    # A sandboxed Hermes's model cannot write zone.json (macOS and Linux both deny it), but an unsandboxed one can
+    # (Windows, or a start the sandbox failed): an empty, relative, root or home folder would refuse nearly every
+    # call, on every start the cache stands in for the Runtime.
     kept = [folder for folder in given
             if os.path.isabs(os.path.expanduser(folder)) and _real(folder) not in (os.sep, _real(home))]
     if len(kept) < len(given):
