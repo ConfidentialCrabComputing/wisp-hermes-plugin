@@ -114,6 +114,9 @@ from a terminal, with `wisp integrate hermes --connectors`.
   was not answering keeps that in its prompt, so start a new one (`/new`). If Wisp is still unavailable in Hermes while
   `hermes mcp test wisp` succeeds, restart Hermes (`hermes gateway restart`). Under a gateway that serves several
   profiles, only the default profile is reconnected this way; the others wait for Hermes's own 5-minute retry.
+- On Linux, a gateway that enables the plugin while it runs (`wisp integrate hermes` run from Hermes's own terminal)
+  restarts into the sandbox in place, and the turn that ran it is lost. Hermes pauses that chat until it is sent
+  `/discard`; no `/restart` is needed. A chat opened in the 30 seconds before stays locked until `/restart`.
 - On Windows the plugin is for connecting to a Wisp on another machine. A zone on the same Windows machine is not
   protected: there is no sandbox, and the check on Hermes's tool calls is untested there.
 

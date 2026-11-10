@@ -1545,6 +1545,42 @@ if sys.argv[1:3] == ["sandbox-exec", "--print-args"]:
         self.assertEqual(argv[argv.index("--"):], ["--", "hermes"])
 
 
+@posix
+class LiveLoad(unittest.TestCase):
+    """The plugin enabled under a running gateway: its chats are open, each held in Hermes's registry by this PID,
+    which the supervisor keeps. `_reexec` up to its exec, against a `wisp` and a bubblewrap that start nothing."""
+
+    def test_the_chats_this_process_holds_are_released_before_it_becomes_the_supervisor(self):
+        spec = importlib.util.spec_from_file_location("wisp_sandbox_under_test", PLUGIN / "sandbox.py")
+        sandbox = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sandbox)
+        tmp = Path(tempfile.mkdtemp(prefix="wisp-hermes-live-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "wisp").write_text(f"#!{sys.executable}\nimport sys\nif '--print-args' in sys.argv: sys.stdout.write('--\\0hermes')\n")
+        # As bubblewrap: its child's PID on the info fd, then the child runs.
+        (tmp / "bwrap").write_text(f"#!{sys.executable}\nimport os, sys, time\n"
+                                   "os.write(int(sys.argv[2]), ('{\"child-pid\": %d}' % os.getpid()).encode())\ntime.sleep(30)\n")
+        for name in ("wisp", "bwrap"):
+            (tmp / name).chmod(0o755)
+        registry = tmp / "runtime" / "active_sessions.json"
+        registry.parent.mkdir()
+        registry.write_text(json.dumps({"entries": [{"lease_id": "mine", "pid": os.getpid()}, {"lease_id": "cli", "pid": 1}]}))
+        held = []
+
+        def execve(*_):
+            held.append([entry["lease_id"] for entry in json.loads(registry.read_text())["entries"]])
+            raise OSError("not in a test")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp)}), patch.object(sys, "path", [str(FAKE), *sys.path]), \
+                patch.dict(sys.modules), patch.object(sandbox, "BWRAP", str(tmp / "bwrap")), \
+                patch.object(sandbox, "_inherited_fds", list), patch.object(sandbox.os, "execve", execve):
+            for name in [n for n in sys.modules if n == "hermes_cli" or n.startswith("hermes_cli.")]:
+                del sys.modules[name]
+            sandbox._reexec(["/zone/a"], "/zone/plugin", str(tmp / "wisp"))
+
+        self.assertEqual(held, [["cli"]])
+
+
 class SandboxModule(unittest.TestCase):
     def setUp(self):
         spec = importlib.util.spec_from_file_location("wisp_sandbox_under_test", PLUGIN / "sandbox.py")
