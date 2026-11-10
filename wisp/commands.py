@@ -19,7 +19,8 @@ def wisp(ctx, raw_args):
     task = (raw_args or "").strip()
     if not task:
         return "Usage: /wisp <task>"
-    if ctx.session_surface() == "cli":
+    # ponytail: a Hermes without `ask_choice` keeps its own client everywhere, as before it could ask.
+    if not hasattr(ctx, "ask_choice") or not hasattr(ctx, "session_surface") or ctx.session_surface() == "cli":
         # Hermes's client, whose panel asks the CLI's Confirmations. Its names for the tools: `mcp__<server>__<tool>`.
         def call(tool, args):
             return json.loads(ctx.dispatch_tool(f"mcp__wisp__{tool}", args))
@@ -35,8 +36,9 @@ def wisp(ctx, raw_args):
                 result = call_tool(*endpoint, tool, args, timeout=WAIT, elicit=lambda message: _ask(ctx, message))
             except (OSError, McpError, ValueError) as exc:
                 return {"error": f"Wisp's {tool} failed: {exc}"}
-            return {"result": "\n".join(c.get("text", "") for c in result["content"]),
-                    "structuredContent": result.get("structuredContent")}
+            structured = result.get("structuredContent")
+            return {"result": "\n".join(c.get("text", "") for c in result.get("content", [])),
+                    "structuredContent": structured if isinstance(structured, dict) else None}
     out = call("ask_wisp", {"task": task})
     while "run" in (out.get("structuredContent") or {}):
         out = call("wisp_result", {"run": out["structuredContent"]["run"]})
