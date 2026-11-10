@@ -1,5 +1,5 @@
-"""Wisp's zone and services, as `wisp_zone` answers them at Hermes's start, and the routing rule built
-from them."""
+"""Wisp's zone and services, as `wisp_zone` answers them at Hermes's start (the services again at each
+session's), and the routing rule built from them."""
 
 import json
 import logging
@@ -19,6 +19,8 @@ ZONE_CACHE = Path(__file__).resolve().parent / "zone.json"
 PIN = Path(__file__).resolve().parent / "pin.json"
 # Hermes drops a longer system prompt section whole (`plugins_dispatch.MAX_SYSTEM_PROMPT_SECTION_CHARS`).
 SECTION_CAP = 4000
+# A session's prompt waits on this read of the Connectors; past it, the cache answers.
+SESSION_TIMEOUT = 2.0
 # Two limits on an answer's folders, for time only, as no real zone nears them: a list that fails costs a probe per
 # folder, at about 57 ms each, and past 2 MB of paths (Linux's usual `ARG_MAX`) every probe of it fails with `E2BIG`. What
 # keeps the pinned folders closed is `pinned_zone` and `protect`'s fallback, not these. `ZONE_BYTES`, Linux's limit on one
@@ -156,6 +158,29 @@ def not_connected_rule(pinned):
 Wisp is the user's private agent: it holds the keys to the user's sensitive accounts and reads their private
 files, and you cannot reach them. {not_connected(pinned)}
 Say so whenever the user asks for Wisp or for anything Wisp does, and do not do the task another way."""
+
+
+def session_rule(zone, url, credential, cache):
+    """The routing rule for a session starting now: `zone`'s folders as of Hermes's start (the sandbox closes a folder
+    only at a start, so a rule naming one added since would call closed a folder Hermes can still open) with the
+    Connectors the endpoint names now, or the cache's when it does not answer, or the start's."""
+    def answered():
+        if not (url and credential):
+            raise ValueError("no endpoint or credential")
+        return call_tool(url, credential, "wisp_zone", timeout=SESSION_TIMEOUT)["structuredContent"]
+
+    def cached():
+        return json.loads(cache.read_text())
+
+    folders = {key: value for key, value in zone.items() if key not in ("services", "connectors")}
+    for read in (answered, cached):
+        try:
+            answer = read()
+            return routing_rule({**folders, "services": answer.get("services") or [],
+                                 **({"connectors": answer["connectors"]} if "connectors" in answer else {})})
+        except Exception as exc:  # noqa: BLE001 — anything read here is data; the start's rule stands in
+            logger.warning("Wisp: no Connectors %s (%r)", read.__name__, exc)
+    return routing_rule(zone)
 
 
 def routing_rule(zone):
