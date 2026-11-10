@@ -23,19 +23,29 @@ ZONE = {"dataDir": "/home/u/.wisp", "deskRoot": "/home/u/.wisp/desks",
 MALFORMED = (b"[]", b"5", b'{"result": "x"}', b'{"result": {"isError": true, "content": "x"}}')
 
 
+def _closed_url():
+    """A loopback `/mcp` nothing listens on: the zone call fails at once and the cache stands in."""
+    closed = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    port = closed.server_address[1]
+    closed.server_close()
+    return f"http://127.0.0.1:{port}/mcp"
+
+
 @unittest.skipIf(sys.platform == "win32", "POSIX paths throughout, which are not absolute on Windows")
 class Rule(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-zone-"))
         self.addCleanup(shutil.rmtree, self.home)
         shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
-        self.config = {"plugins": {"enabled": ["wisp"]}}
+        # Connected, as `hermes wisp connect` leaves a profile.
+        self.config = {"plugins": {"enabled": ["wisp"]}, "mcp_servers": {"wisp": {"url": _closed_url()}}}
+        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
 
-    def hermes(self, *argv, **extra_env):
+    def hermes(self, *argv, input=None, **extra_env):
         (self.home / "config.yaml").write_text(json.dumps(self.config))
         env = {key: value for key, value in os.environ.items() if key.lower() != "no_proxy"}
         env.update(HERMES_HOME=str(self.home), PATH=f"{FAKE}{os.pathsep}{os.environ['PATH']}", **extra_env)
-        done = subprocess.run(["hermes", *argv], env=env, capture_output=True, text=True, timeout=60)
+        done = subprocess.run(["hermes", *argv], env=env, capture_output=True, text=True, timeout=60, input=input)
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout
 
@@ -105,6 +115,54 @@ Desk root /home/u/.wisp/desks;
         for source in PLUGIN.glob("*.py"):
             with self.subTest(source=source.name):
                 self.assertFalse({"\u2028", "\u2029"} & set(source.read_text(encoding="utf-8")))
+
+    def refusal(self):
+        """What the hook answers a read inside the zone."""
+        return json.loads(self.hermes("pre-tool-call", input=json.dumps([["read_file", {"path": "/home/u/bank/a.csv"}]])))[0]
+
+    def not_connected(self):
+        """Each way a profile can leave Wisp unconnected: no `mcp_servers.wisp`, or no credential."""
+        server = self.config.pop("mcp_servers")
+        yield "no mcp_servers.wisp"
+        self.config["mcp_servers"] = server
+        (self.home / ".env").write_text("")
+        yield "no credential"
+
+    def test_unconnected_beside_integrates_pin_the_rule_and_the_refusal_say_to_run_integrate(self):
+        (self.home / "plugins" / "wisp" / "pin.json").write_text(json.dumps({**ZONE, "url": _closed_url()}))
+
+        for state in self.not_connected():
+            with self.subTest(state):
+                rule = self.rule(ZONE)
+
+                self.assertIn("Wisp is not connected", rule)
+                self.assertIn("`wisp integrate hermes`", rule)
+                self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+                self.assertIn("Wisp is not connected", self.refusal())
+                self.assertIn("`wisp integrate hermes`", self.refusal())
+
+    def test_unconnected_with_no_pin_the_rule_and_the_refusal_say_to_run_connect(self):
+        for state in self.not_connected():
+            with self.subTest(state):
+                rule = self.rule(ZONE)
+
+                self.assertIn("Wisp is not connected", rule)
+                self.assertIn("`hermes wisp connect https://<host>/mcp`", rule)
+                self.assertNotIn("wisp integrate hermes", rule)
+                self.assertIn("`hermes wisp connect https://<host>/mcp`", self.refusal())
+
+    def test_a_config_that_cannot_be_read_leaves_the_pinned_rule(self):
+        (self.home / "plugins" / "wisp" / "pin.json").write_text(json.dumps({**ZONE, "url": _closed_url()}))
+
+        rule = json.loads(self.hermes("sections", FAKE_HERMES_RAW_CONFIG_RAISES="1"))["wisp-routing"]
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+
+    def test_unconnected_with_no_zone_at_all_the_rule_still_says_so(self):
+        self.config.pop("mcp_servers")
+
+        self.assertIn("`hermes wisp connect https://<host>/mcp`",
+                      json.loads(self.hermes("sections"))["wisp-routing"])
 
     def test_a_malformed_cache_leaves_the_plugin_loaded_and_no_rule(self):
         for zone in ([ZONE], "zone", {**ZONE, "privateFolders": [{"name": "bank"}]}):

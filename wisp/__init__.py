@@ -9,7 +9,8 @@ from pathlib import Path
 from . import commands, connect
 from .hook import make_hook
 from .sandbox import UNPROTECTED, protect
-from .zone import PIN, ZONE_CACHE, load_pin, load_zone, pinned_zone, routing_rule
+from .zone import (PIN, ZONE_CACHE, load_pin, load_zone, not_connected, not_connected_rule, pinned_zone,
+                   routing_rule)
 
 logger = logging.getLogger(__name__)
 # The Hermes MCP servers `wisp integrate hermes` switched off because Wisp holds them now: written from
@@ -43,7 +44,17 @@ def register(ctx):
     ctx.register_command("wisp-model", commands.wisp_model,
                          description="Show or set the model Wisp uses for Hermes's tasks",
                          args_hint="[advanced|balanced|<model id>|thinking on|off|reset]")
+    pinned = PIN.exists()
+
+    def unconnected():
+        """The not-connected refusal while this profile names no Wisp endpoint or holds no credential, else None.
+        Read again each time: `wisp integrate hermes` or `hermes wisp connect` can mend it while Hermes runs."""
+        connected = (((read_raw_config().get("mcp_servers") or {}).get("wisp")) and
+                     get_env_value(connect.CREDENTIAL_ENV))
+        return None if connected else not_connected(pinned)
+
     zone = None
+    rule = ""
     protected = False
     try:
         pin = load_pin(PIN)
@@ -63,11 +74,21 @@ def register(ctx):
                                    pinned=pin, wisp=(pin or {}).get("wisp")):
                 _warn(warning)
             protected = True
-            ctx.register_system_prompt_section("wisp-routing", routing_rule(zone))
+            rule = routing_rule(zone)
     except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, never a failed load
         logger.warning("Wisp: no routing rule, the zone is malformed: %r", exc)
-        if not protected and PIN.exists():
+        if not protected and pinned:
             _warn(f"{UNPROTECTED}: the pin or the zone is malformed, so Hermes is not sandboxed")
+
+    def section(_session):
+        """Rendered into each new session's prompt, so it says the state Wisp is in then; blank, Hermes leaves it out."""
+        try:
+            return not_connected_rule(pinned) if unconnected() else rule
+        except Exception as exc:  # noqa: BLE001 — one that raises Hermes skips, and the rule with it
+            logger.warning("Wisp: could not tell whether Wisp is connected: %r", exc)
+            return rule
+
+    ctx.register_system_prompt_section("wisp-routing", section)
     # Built here, not per call: a hook that raises blocks every tool call (Hermes fails closed).
     config_path = get_config_path()
     try:
@@ -75,8 +96,8 @@ def register(ctx):
     except (OSError, ValueError):
         moved = []
     try:
-        hook = make_hook(zone, config_path, moved if isinstance(moved, list) else [])
+        hook = make_hook(zone, config_path, moved if isinstance(moved, list) else [], unconnected)
     except Exception as exc:  # noqa: BLE001 — a malformed zone still leaves the switch-off attempts refused
         logger.warning("Wisp: the hook guards no zone, it is malformed: %r", exc)
-        hook = make_hook(None, config_path)
+        hook = make_hook(None, config_path, unconnected=unconnected)
     ctx.register_hook("pre_tool_call", hook)
