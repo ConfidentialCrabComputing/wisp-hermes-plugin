@@ -1,4 +1,4 @@
-"""This repository installs with a real Hermes's `hermes plugins install file://<path> --enable` and loads.
+"""The plugin's folder installs with a real Hermes's `hermes plugins install file://<path>#wisp --enable` and loads.
 Needs a real `hermes` on PATH; skipped without one. Installs the committed HEAD."""
 
 import os
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-PLUGIN = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[1]
 HERMES = shutil.which("hermes")
 
 
@@ -20,14 +20,20 @@ class Install(unittest.TestCase):
         self.env = {**os.environ, "HERMES_HOME": str(self.tmp / "home")}
         (self.tmp / "home").mkdir()
 
-    def hermes(self, *argv):
+    def hermes(self, *argv, code=0):
         done = subprocess.run([HERMES, *argv], env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(done.returncode, code, done.stdout + done.stderr)
         return done.stdout
 
-    def test_installs_from_a_local_git_path_and_loads(self):
-        # --force: Hermes's scanner says `caution` of this plugin, and with no terminal to ask on it refuses.
-        self.hermes("plugins", "install", f"file://{PLUGIN}", "--enable", "--force")
+    def test_scans_and_installs_only_the_plugin_folder_as_wisp_and_it_loads(self):
+        # Without --force and with no terminal to ask on, Hermes lists its scanner's `caution` findings and refuses.
+        scan = self.hermes("plugins", "install", f"file://{REPO}#wisp", code=1)
+        self.assertIn("Verdict: CAUTION", scan)
+        self.assertIn("sandbox.py:", scan)
+        self.assertNotIn("tests/", scan)
+        self.assertNotIn("README", scan)
+
+        self.hermes("plugins", "install", f"file://{REPO}#wisp", "--enable", "--force")
 
         self.assertTrue((self.tmp / "home" / "plugins" / "wisp" / "plugin.yaml").exists())
         # The plugin's CLI command exists only once Hermes has loaded the plugin.

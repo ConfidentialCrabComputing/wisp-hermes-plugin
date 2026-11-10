@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 FAKE = Path(__file__).resolve().parent / "fake"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 # Hermes drops a longer section whole (`plugins_dispatch.MAX_SYSTEM_PROMPT_SECTION_CHARS`).
 SECTION_CAP = 4000
 ZONE = {"dataDir": "/home/u/.wisp", "deskRoot": "/home/u/.wisp/desks",
@@ -28,7 +28,7 @@ class Rule(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-zone-"))
         self.addCleanup(shutil.rmtree, self.home)
-        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
+        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
         self.config = {"plugins": {"enabled": ["wisp"]}}
 
     def hermes(self, *argv, **extra_env):

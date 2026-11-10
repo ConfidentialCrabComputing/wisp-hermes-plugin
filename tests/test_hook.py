@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 FAKE = Path(__file__).resolve().parent / "fake"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 ZONE = {"dataDir": "/home/u/.wisp", "deskRoot": "/home/u/Wisp",
         "privateFolders": [{"path": "/home/u/bank"}], "services": ["gmail"]}
 
@@ -23,7 +23,7 @@ class Hook(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-hook-"))
         self.addCleanup(shutil.rmtree, self.home)
-        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
+        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
         (self.home / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["wisp"]}}))
         self.zone(ZONE)
 

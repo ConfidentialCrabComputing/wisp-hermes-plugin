@@ -16,12 +16,23 @@ wisp tokens create --name hermes --host-agent
 On Hermes's machine, install the plugin and connect it. `connect` reads the credential from stdin, without echo:
 
 ```sh
-hermes plugins install https://github.com/ConfidentialCrabComputing/wisp-hermes-plugin --enable
+hermes plugins install ConfidentialCrabComputing/wisp-hermes-plugin/wisp --enable
 hermes wisp connect https://wisp.example.ts.net/mcp
 ```
 
-Hermes's install-time scanner gives this plugin a `caution` verdict, because its sandbox starts subprocesses and reads
-`/proc`. In a terminal, Hermes lists the findings and asks whether to go on. With no terminal it refuses unless you add
+The plugin is the repository's `wisp/` folder: Hermes clones and scans only that folder and installs it as `wisp`.
+
+Hermes's install-time scanner gives this plugin a `caution` verdict, with 14 findings, all in the plugin's own code:
+
+- `sandbox.py` starts processes: `wisp sandbox-exec` to build the sandbox, bubblewrap to start Hermes inside it, and
+  `systemctl show` to tell whether a service manager restarts Hermes. It reads its own `/proc/self` (`mountinfo`,
+  `cgroup`, `fd`) to see whether it is already sandboxed, which service it runs under and which file descriptors to
+  pass on. A comment names `/proc/self`, and a message says `sudo apt install bubblewrap` when bubblewrap is missing.
+- `connect.py` runs `hermes config set` to register Wisp's endpoint, and its comments name the commands (`printenv`,
+  `cat ~/.hermes/.env`) by which Hermes's model could read the credential.
+- `zone.py` holds a pattern of control characters, which it strips from the zone's text before Hermes's prompt sees it.
+
+In a terminal, Hermes lists the findings and asks whether to go on. With no terminal it refuses unless you add
 `--force` to `hermes plugins install`.
 
 The URL is `https://` or loopback; plain http off loopback is refused. `hermes wisp connect --remove` reverses it.
@@ -110,8 +121,8 @@ bubblewrap, as root on Ubuntu, and skip without them. wisp-agent is private, so 
 
 ## Changing the plugin
 
-The `wisp` binary embeds this repository's committed HEAD (all of it but `tests/` and `.github/`). After a commit here, run
-`pnpm run hermes-plugin:sync` in wisp-agent and commit the archive there.
+The plugin's code is in `wisp/`. The `wisp` binary embeds that folder at this repository's committed HEAD. After a
+commit here, run `pnpm run hermes-plugin:sync` in wisp-agent and commit the archive there.
 
 ## License
 
