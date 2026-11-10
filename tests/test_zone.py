@@ -233,6 +233,57 @@ Desk root /home/u/.wisp/desks;
 
                 self.assertIn("/home/u/bank", self.rule(ZONE))
 
+    def answers(self, *zones):
+        """An endpoint whose `wisp_zone` answers `zones` in turn, the last one ever after: the first at Hermes's start,
+        the next when a session's prompt is built."""
+        left = list(zones)
+        self.endpoint(lambda handler: self.answer_zone(handler, left.pop(0) if len(left) > 1 else left[0]))
+
+    @staticmethod
+    def answer_zone(handler, zone):
+        body = json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"content": [], "structuredContent": zone}}).encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    def test_a_connector_connected_since_hermess_start_is_named_by_a_new_session(self):
+        gmail = {"name": "gmail", "displayName": "Gmail", "description": "Mail"}
+        self.answers({**ZONE, "connectors": [{**gmail, "status": "requires_auth"}]},
+                     {**ZONE, "connectors": [{**gmail, "status": "connected"}]})
+
+        rule = json.loads(self.hermes("sections"))["wisp-routing"]
+
+        self.assertIn("Wisp's services: Gmail (gmail): Mail;", rule)
+
+    def test_a_private_folder_added_since_hermess_start_is_not_named_by_a_new_session(self):
+        self.answers(ZONE, {**ZONE, "privateFolders": [*ZONE["privateFolders"], {"path": "/home/u/taxes"}]})
+
+        rule = json.loads(self.hermes("sections"))["wisp-routing"]
+
+        self.assertIn("/home/u/bank", rule)
+        self.assertNotIn("/home/u/taxes", rule)
+
+    def test_a_session_whose_endpoint_does_not_answer_takes_the_connectors_from_the_cache(self):
+        cache = self.home / "plugins" / "wisp" / "zone.json"
+        calls = []
+
+        def answer(handler):
+            calls.append(1)
+            if len(calls) == 1:
+                return self.answer_zone(handler, {**ZONE, "connectors": []})
+            # Since Hermes's start, the cache learnt of a connected Connector, and the endpoint stopped answering.
+            cache.write_text(json.dumps({**ZONE, "connectors": [{"name": "notion", "status": "connected"}]}))
+            handler.send_error(503)
+
+        self.endpoint(answer)
+
+        rule = json.loads(self.hermes("sections"))["wisp-routing"]
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Wisp's services: notion;", rule)
+
     def test_the_zone_call_to_a_loopback_endpoint_never_goes_through_a_proxy(self):
         proxied = []
 

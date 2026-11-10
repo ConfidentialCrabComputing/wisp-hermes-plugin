@@ -10,7 +10,7 @@ from . import commands, connect
 from .hook import make_hook
 from .sandbox import UNPROTECTED, protect
 from .zone import (PIN, ZONE_CACHE, load_pin, load_zone, not_connected, not_connected_rule, pinned_zone,
-                   routing_rule)
+                   routing_rule, session_rule)
 
 logger = logging.getLogger(__name__)
 # The Hermes MCP servers `wisp integrate hermes` switched off because Wisp holds them now: written from
@@ -53,7 +53,7 @@ def register(ctx):
                      get_env_value(connect.CREDENTIAL_ENV))
         return None if connected else not_connected(pinned)
 
-    zone = None
+    zone = pin = None
     rule = ""
     protected = False
     try:
@@ -83,7 +83,13 @@ def register(ctx):
     def section(_session):
         """Rendered into each new session's prompt, so it says the state Wisp is in then; blank, Hermes leaves it out."""
         try:
-            return not_connected_rule(pinned) if unconnected() else rule
+            if unconnected():
+                return not_connected_rule(pinned)
+            if not rule:
+                return rule
+            # The Connectors as of now: `wisp connectors auth` while Hermes runs needs no restart.
+            url = pin["url"] if pin else ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
+            return session_rule(zone, url, get_env_value(connect.CREDENTIAL_ENV), ZONE_CACHE)
         except Exception as exc:  # noqa: BLE001 — one that raises Hermes skips, and the rule with it
             logger.warning("Wisp: could not tell whether Wisp is connected: %r", exc)
             return rule
