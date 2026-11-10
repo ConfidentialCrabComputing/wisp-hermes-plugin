@@ -80,10 +80,11 @@ def _hermes(*argv):
 
 def _read_credential():
     # getpass reads the terminal when there is one; a pipe (`wisp integrate hermes`) is read as is.
-    credential = getpass.getpass("Wisp credential: ") if sys.stdin.isatty() else sys.stdin.readline()
+    prompt = "Wisp Host Agent Credential (printed by `wisp tokens create --name hermes --host-agent`): "
+    credential = getpass.getpass(prompt) if sys.stdin.isatty() else sys.stdin.readline()
     credential = credential.strip()
     if not credential:
-        sys.exit("No credential given: paste the one `wisp tokens create --name <name> --host-agent` printed.")
+        sys.exit("No Host Agent Credential given: paste the one `wisp tokens create --name <name> --host-agent` printed.")
     return credential
 
 
@@ -99,9 +100,11 @@ def _check_url(url):
         return
     sys.exit(f"""Refusing {url}: the credential would cross the network in the clear.
 Wisp's Runtime listens on 127.0.0.1 only. Either put https in front of it on its machine
-(Tailscale Serve: `tailscale serve --bg <port>`, or Caddy as a reverse proxy) and connect to the https URL,
-or keep an ssh tunnel up as a service (`ssh -L <port>:127.0.0.1:<port> <runtime host>`, e.g. autossh under
-systemd or launchd) and connect to http://127.0.0.1:<port>/mcp.""")
+(Tailscale Serve: `tailscale serve --bg <port>`, or Caddy as a reverse proxy) and connect to the https URL;
+the Runtime refuses that https name until it is told it:
+`wisp tokens create --name hermes --host-agent --public-url https://<name>`.
+Or keep an ssh tunnel up as a service (`ssh -L <port>:127.0.0.1:<port> <runtime host>`, e.g. autossh
+under systemd or launchd) and connect to http://127.0.0.1:<port>/mcp.""")
 
 
 def _is_loopback(host):

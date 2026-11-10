@@ -58,6 +58,10 @@ class ConnectDecides(unittest.TestCase):
 
                 for recipe in ("Tailscale Serve", "Caddy", "ssh -L"):
                     self.assertIn(recipe, str(refused.exception))
+                # The Runtime refuses the https name it was never told: the refusal names telling it.
+                self.assertIn("tailscale serve --bg <port>", str(refused.exception))
+                self.assertIn("wisp tokens create --name hermes --host-agent --public-url https://<name>",
+                              str(refused.exception))
                 self.children.assert_not_called()
                 self.assertFalse((self.home / ".env").exists())
 
@@ -73,6 +77,16 @@ class ConnectDecides(unittest.TestCase):
                 self.assertEqual(json.loads(argvs[0][6])["url"], url)
                 self.assertNotIn(CREDENTIAL, json.dumps(argvs))
                 self.assertIn(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}", (self.home / ".env").read_text())
+
+    def test_asks_a_terminal_for_the_host_agent_credential_by_the_command_that_prints_it(self):
+        terminal = mock.Mock(isatty=lambda: True)
+        with mock.patch("sys.stdin", terminal), mock.patch("getpass.getpass", return_value=CREDENTIAL) as asked, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.plugin.connect(URL)
+
+        prompt = asked.call_args.args[0]
+        self.assertIn("Wisp Host Agent Credential", prompt)
+        self.assertIn("wisp tokens create --name hermes --host-agent", prompt)
 
     def test_remove_says_nothing_of_a_zone_cache_its_sandbox_refuses_to_delete(self):
         cache = self.home / "plugins" / "wisp" / "zone.json"
