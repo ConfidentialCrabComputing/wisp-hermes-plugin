@@ -271,8 +271,18 @@ def main(argv):
     elif argv[:1] == ["slash"] and len(argv) in (2, 3):
         print(load_plugin().commands[argv[1]](argv[2] if len(argv) == 3 else ""))
     elif argv == ["sections"]:
-        # Not Hermes's: the system prompt sections a new session would get.
-        print(json.dumps(load_plugin().sections))
+        # Not Hermes's: the system prompt sections a new session would get, rendered as Hermes renders them
+        # (`plugins_dispatch._render_prompt_section_text`): a callable gets the session's info, and a section
+        # that raises, is no string or is blank is left out.
+        rendered = {}
+        for id, content in load_plugin().sections.items():
+            try:
+                text = content({}) if callable(content) else content
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(text, str) and text.strip():
+                rendered[id] = text.strip()
+        print(json.dumps(rendered))
     elif argv == ["pre-tool-call"]:
         # Not Hermes's: each `[tool_name, args]` of the JSON list on stdin, through the plugin's
         # `pre_tool_call` hooks; prints the block message of each, null when it proceeds.

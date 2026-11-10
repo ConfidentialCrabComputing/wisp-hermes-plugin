@@ -918,6 +918,7 @@ class Pin(HermesHome):
     def setUp(self):
         super().setUp()
         (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
+        self.repoint(_closed_url())
         self.zone = None
         self.pin = {"url": _closed_url(), "dataDir": str(self.data_dir), "deskRoot": str(self.data_dir / "desks"),
                     "privateFolders": [{"path": str(self.bank)}]}

@@ -141,6 +141,23 @@ def _plainly(connector):
     return f"{shown}: {connector['description']}" if connector.get("description") else shown
 
 
+def not_connected(pinned):
+    """What the hook refuses with, and the rule says, while this profile names no Wisp endpoint or holds no
+    credential: there is no `ask_wisp`, so nothing may route to it. `pinned`: `wisp integrate hermes` put Wisp on
+    this machine, and it is the repair; else Wisp is on another machine, and `hermes wisp connect` is."""
+    run = ("`wisp integrate hermes`" if pinned else
+           "`hermes wisp connect https://<host>/mcp` (with the credential `wisp tokens create --name <name> --host-agent` printed)")
+    return f"Wisp is not connected to Hermes: tell the user to run {run} in a terminal, then restart Hermes."
+
+
+def not_connected_rule(pinned):
+    """The routing rule while Wisp is not connected."""
+    return f"""# Wisp
+Wisp is the user's private agent: it holds the keys to the user's sensitive accounts and reads their private
+files, and you cannot reach them. {not_connected(pinned)}
+Say so whenever the user asks for Wisp or for anything Wisp does, and do not do the task another way."""
+
+
 def routing_rule(zone):
     """The system prompt section that sends Wisp's tasks to `ask_wisp`, within Hermes's section cap: what
     does not fit is counted, not listed."""

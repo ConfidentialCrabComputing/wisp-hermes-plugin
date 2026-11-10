@@ -59,10 +59,11 @@ def _moved_names(moved):
     return [name for name in moved if isinstance(name, str) and _SERVER_NAME.fullmatch(name)]
 
 
-def make_hook(zone, config_path, moved=()):
+def make_hook(zone, config_path, moved=(), unconnected=lambda: None):
     """The hook for `zone` (None: only the switch-off attempts are refused); `config_path` is Hermes's
     `config.yaml`, whose `plugins` section enables this plugin; `moved` names Hermes's MCP servers
-    switched off because Wisp holds them now."""
+    switched off because Wisp holds them now; `unconnected()`, asked at each refusal, what to refuse with
+    instead of `ask_wisp` while there is none (None while Wisp is connected)."""
     given = ([zone["dataDir"], zone["deskRoot"], *(f["path"] for f in zone.get("privateFolders") or []),
               *(zone.get("secretFiles") or [])] if zone else [])
     home = os.path.expanduser("~")
@@ -97,6 +98,16 @@ def make_hook(zone, config_path, moved=()):
         return any(real == folder or real.startswith(folder + os.sep) for folder in among)
 
     def pre_tool_call(tool_name, args, **_):
+        if refused(tool_name, args) is None:
+            return None
+        try:
+            message = unconnected()
+        except Exception as exc:  # noqa: BLE001 — a refusal that raises would still block, naming nothing
+            logger.warning("Wisp: could not tell whether Wisp is connected: %r", exc)
+            message = None
+        return {"action": "block", "message": message} if message else REFUSAL
+
+    def refused(tool_name, args):
         if tool_name in FILE_TOOLS:
             path = args.get("path")
             if isinstance(path, str) and (inside(path, folders) or (
