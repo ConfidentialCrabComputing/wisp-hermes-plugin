@@ -102,7 +102,7 @@ class HermesHome(unittest.TestCase):
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
         source = self.tmp / "source"
         shutil.copytree(FAKE, source, ignore=shutil.ignore_patterns("__pycache__"))
-        (source / "tools").mkdir()
+        (source / "tools").mkdir(exist_ok=True)
         return venv, source
 
     def start_as(self, python, hermes, code):

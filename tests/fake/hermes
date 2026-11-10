@@ -16,7 +16,8 @@ does for a message (`gateway/run_inbound_hooks.py`: the name with `_` made `-`),
 returns, or "Unknown command /<name>" (`ctx.session_surface()` is `cli` for one, `telegram` for the other,
 and `ctx.ask_choice` logs to `$HERMES_HOME/choices.log` and picks the label `FAKE_HERMES_CHOICE`); its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
 answered, in order, from `$HERMES_HOME/tools.json` ({tool: [handler result, ...]}), as Hermes's registry
-would answer them (a JSON string)."""
+would answer them (a JSON string). `FAKE_HERMES_WISP_STATUS` makes it a Hermes that connects its MCP servers,
+with Hermes's MCP client (`tests/fake/tools`) loaded before the plugin and `wisp` in that status."""
 
 import argparse
 import importlib.util
@@ -161,7 +162,10 @@ def load_plugin():
     # Hermes loads a user plugin only when `plugins.enabled` lists it (`plugins_discovery.gate_manifest`).
     if "wisp" not in ((config().get("plugins") or {}).get("enabled") or []):
         return ctx
-    spec = importlib.util.spec_from_file_location(
+    if os.environ.get("FAKE_HERMES_WISP_STATUS"):
+        # A Hermes that connects its MCP servers (a chat, a gateway) has its MCP client loaded by then.
+        import tools.mcp_tool_discovery  # noqa: F401
+    spec =importlib.util.spec_from_file_location(
         "hermes_plugins_wisp", PLUGIN / "__init__.py", submodule_search_locations=[str(PLUGIN)])
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

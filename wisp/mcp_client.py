@@ -4,8 +4,11 @@ It runs before Hermes connects its MCP servers (at the plugin's load), from `/wi
 gateway, where Hermes's client has no one to ask a Confirmation of (a command runs outside an agent turn), so this one
 asks it itself. Standard library only."""
 
+import ipaddress
 import json
+import socket
 import time
+import urllib.parse
 import urllib.request
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -25,6 +28,26 @@ _open = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect
 
 class McpError(Exception):
     """The endpoint answered, but not with the tool's result."""
+
+
+def refuses(url, timeout=1.0):
+    """Whether nothing listens on a loopback `url` (a Runtime stopped or restarting, or an `ssh -L` tunnel down).
+    A slow endpoint is not refusing, and another host's is never probed: Hermes may reach it through a proxy this
+    would not take, and Hermes's own client tells of it."""
+    parts = urllib.parse.urlsplit(url or "")
+    try:
+        if parts.hostname != "localhost" and not ipaddress.ip_address(parts.hostname or "").is_loopback:
+            return False
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return False
+    try:
+        socket.create_connection((parts.hostname, port), timeout=timeout).close()
+    except ConnectionError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def call_tool(url, credential, name, arguments=None, timeout=5.0, elicit=None):
