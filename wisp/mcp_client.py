@@ -1,8 +1,8 @@
 """The plugin's own short MCP client: one tool call on Wisp's endpoint over Streamable HTTP.
 
-It runs before Hermes connects its MCP servers (at the plugin's load) and from `/wisp-model`, so it
-cannot borrow Hermes's client. Standard library only. ponytail: no elicitation and no ping replies, which
-only `ask_wisp` and `wisp_result` need; Hermes's own client makes those calls."""
+It runs before Hermes connects its MCP servers (at the plugin's load), from `/wisp-model`, and from `/wisp` on a
+gateway, where Hermes's client has no one to ask a Confirmation of (a command runs outside an agent turn), so this one
+asks it itself. Standard library only."""
 
 import json
 import time
@@ -27,9 +27,11 @@ class McpError(Exception):
     """The endpoint answered, but not with the tool's result."""
 
 
-def call_tool(url, credential, name, arguments=None, timeout=5.0):
+def call_tool(url, credential, name, arguments=None, timeout=5.0, elicit=None):
     """The `CallToolResult` of tool `name`; raises `McpError` for a refusal or a tool error and `OSError`
-    when the endpoint cannot be reached, or `TimeoutError` when the whole call outlasts `timeout`."""
+    when the endpoint cannot be reached, or `TimeoutError` when the whole call outlasts `timeout`. With `elicit`,
+    the client declares elicitation and answers each of the server's form elicitations with
+    `elicit(message)`: "accept", "decline" or "cancel"."""
     session = {}
     deadline = time.monotonic() + timeout
 
@@ -51,13 +53,25 @@ def call_tool(url, credential, name, arguments=None, timeout=5.0):
         with _open(request, timeout=left()) as response:
             if "id" not in session and response.headers.get("Mcp-Session-Id"):
                 session["id"] = response.headers["Mcp-Session-Id"]
-            if message is None or "id" not in message:
-                return None
-            return _answer(response, message["id"], left)
+            if message is None or "id" not in message or "method" not in message:
+                return None  # a notification or our answer to a request of the server's
+            return _answer(response, message["id"], left, reply)
+
+    def reply(request):
+        """Our answer to the server's own `request`, sent while its stream waits on it."""
+        params = request.get("params") if isinstance(request.get("params"), dict) else {}
+        if request["method"] == "ping":
+            answer = {"result": {}}
+        elif request["method"] == "elicitation/create" and elicit and params.get("mode", "form") == "form":
+            action = elicit(str(params.get("message") or ""))
+            answer = {"result": {"action": action, **({"content": {}} if action == "accept" else {})}}
+        else:
+            answer = {"error": {"code": -32601, "message": f"{request['method']} is not supported"}}
+        send({"jsonrpc": "2.0", "id": request["id"], **answer})
 
     initialized = _object(send({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
+        "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {"elicitation": {}} if elicit else {},
                    "clientInfo": {"name": "wisp-hermes-plugin", "version": "1"}},
     }), "initialize's answer")
     if "result" not in initialized:
@@ -108,15 +122,20 @@ def _lines(response, left):
     yield rest
 
 
-def _answer(response, request_id, left):
+def _answer(response, request_id, left, reply):
     """The JSON-RPC response to `request_id`, from a JSON body or an SSE stream (skipping the server's
-    own requests and notifications)."""
+    notifications, and handing its own requests to `reply`)."""
     if response.headers.get_content_type() == "application/json":
         return json.loads(b"".join(_chunks(response, left)))
     for line in _lines(response, left):
         if not line.startswith(b"data:"):
             continue
         message = json.loads(line[5:])
-        if isinstance(message, dict) and "method" not in message and message.get("id") == request_id:
+        if not isinstance(message, dict):
+            continue
+        if "method" in message:
+            if "id" in message and isinstance(message["method"], str):
+                reply(message)
+        elif message.get("id") == request_id:
             return message
     raise McpError("the endpoint closed the stream without an answer")
