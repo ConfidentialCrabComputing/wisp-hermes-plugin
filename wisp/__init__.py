@@ -31,7 +31,7 @@ def _warn(line):
 
 
 def register(ctx):
-    from hermes_cli.config import get_config_path, get_env_value, read_raw_config
+    from hermes_cli.config import get_config_path, get_env_value, load_env, read_raw_config
 
     # First, so no zone can take `hermes wisp connect` (the way to repair one) down with it.
     ctx.register_cli_command(
@@ -44,13 +44,27 @@ def register(ctx):
     ctx.register_command("wisp-model", commands.wisp_model,
                          description="Show or set the model Wisp uses for Hermes's tasks",
                          args_hint="[advanced|balanced|<model id>|thinking on|off|reset]")
+    from agent.secret_scope import UnscopedSecretError
+
     pinned = PIN.exists()
+
+    def credential():
+        """The profile's Wisp credential, or None. Hermes raises for any key, set or not, read with multiplexing on
+        and no profile scope; the profile's own `.env`, where `hermes wisp connect` saves it, answers then."""
+        try:
+            return get_env_value(connect.CREDENTIAL_ENV)
+        except UnscopedSecretError:
+            return load_env().get(connect.CREDENTIAL_ENV)
 
     def unconnected():
         """The not-connected refusal while this profile names no Wisp endpoint or holds no credential, else None.
-        Read again each time: `wisp integrate hermes` or `hermes wisp connect` can mend it while Hermes runs."""
-        connected = (((read_raw_config().get("mcp_servers") or {}).get("wisp")) and
-                     get_env_value(connect.CREDENTIAL_ENV))
+        Read again each time: `wisp integrate hermes` or `hermes wisp connect` can mend it while Hermes runs.
+        Connected only when read so: a check that raises says not connected, never `ask_wisp`."""
+        try:
+            connected = (((read_raw_config().get("mcp_servers") or {}).get("wisp")) and credential())
+        except Exception as exc:  # noqa: BLE001 — unsure is not connected
+            logger.warning("Wisp: could not tell whether Wisp is connected: %r", exc)
+            connected = False
         return None if connected else not_connected(pinned)
 
     zone = pin = None
@@ -61,10 +75,10 @@ def register(ctx):
         if pin is not None:
             # Pinned, the URL is integrate's (Hermes's model can repoint `config.yaml`'s at its own endpoint), and the pin
             # alone is a zone: whatever fails in reading more, the sandbox, the hook and the rule have it.
-            zone = pinned_zone(pin, lambda: get_env_value(connect.CREDENTIAL_ENV), ZONE_CACHE)
+            zone = pinned_zone(pin, credential, ZONE_CACHE)
         else:
             url = ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
-            zone = load_zone(url, get_env_value(connect.CREDENTIAL_ENV), ZONE_CACHE)
+            zone = load_zone(url, credential(), ZONE_CACHE)
             if zone is None and url:
                 _warn(f"{UNPROTECTED}: Wisp's zone could not be read, so Hermes is not sandboxed")
         if zone is not None:
@@ -82,16 +96,16 @@ def register(ctx):
 
     def section(_session):
         """Rendered into each new session's prompt, so it says the state Wisp is in then; blank, Hermes leaves it out."""
+        if unconnected():
+            return not_connected_rule(pinned)
+        if not rule:
+            return rule
         try:
-            if unconnected():
-                return not_connected_rule(pinned)
-            if not rule:
-                return rule
             # The Connectors as of now: `wisp connectors auth` while Hermes runs needs no restart.
             url = pin["url"] if pin else ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
-            return session_rule(zone, url, get_env_value(connect.CREDENTIAL_ENV), ZONE_CACHE)
-        except Exception as exc:  # noqa: BLE001 — one that raises Hermes skips, and the rule with it
-            logger.warning("Wisp: could not tell whether Wisp is connected: %r", exc)
+            return session_rule(zone, url, credential(), ZONE_CACHE)
+        except Exception as exc:  # noqa: BLE001 — the start's rule then, one that raises Hermes skips
+            logger.warning("Wisp: could not read the Connectors as of now: %r", exc)
             return rule
 
     ctx.register_system_prompt_section("wisp-routing", section)

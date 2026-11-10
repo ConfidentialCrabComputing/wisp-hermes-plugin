@@ -151,12 +151,36 @@ Desk root /home/u/.wisp/desks;
                 self.assertNotIn("wisp integrate hermes", rule)
                 self.assertIn("`hermes wisp connect https://<host>/mcp`", self.refusal())
 
-    def test_a_config_that_cannot_be_read_leaves_the_pinned_rule(self):
+    def told(self, **env):
+        """The rule and the refusal of a read inside the zone, with the fake Hermes's `env`."""
+        (self.home / "plugins" / "wisp" / "zone.json").write_text(json.dumps(ZONE))
+        rule = json.loads(self.hermes("sections", **env)).get("wisp-routing")
+        read = [["read_file", {"path": "/home/u/bank/a.csv"}]]
+        return rule, json.loads(self.hermes("pre-tool-call", input=json.dumps(read), **env))[0]
+
+    def test_a_check_that_raises_says_wisp_is_not_connected_never_ask_wisp(self):
         (self.home / "plugins" / "wisp" / "pin.json").write_text(json.dumps({**ZONE, "url": _closed_url()}))
 
-        rule = json.loads(self.hermes("sections", FAKE_HERMES_RAW_CONFIG_RAISES="1"))["wisp-routing"]
+        for raises in ("FAKE_HERMES_RAW_CONFIG_RAISES", "FAKE_HERMES_ENV_VALUE_RAISES"):
+            with self.subTest(raises):
+                rule, refusal = self.told(**{raises: "1"})
 
+                self.assertIn("Wisp is not connected", rule)
+                self.assertNotIn("ask_wisp", rule)
+                self.assertIn("`wisp integrate hermes`", refusal)
+                self.assertNotIn("ask_wisp", refusal)
+
+    def test_a_secret_hermes_guards_is_read_from_the_profiles_env_not_raised(self):
+        unscoped = {"FAKE_HERMES_ENV_VALUE_UNSCOPED": "1"}
+
+        rule, refusal = self.told(**unscoped)
         self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn("ask_wisp", refusal)
+
+        (self.home / ".env").write_text("")
+        rule, refusal = self.told(**unscoped)
+        self.assertIn("`hermes wisp connect https://<host>/mcp`", rule)
+        self.assertIn("`hermes wisp connect https://<host>/mcp`", refusal)
 
     def test_unconnected_with_no_zone_at_all_the_rule_still_says_so(self):
         self.config.pop("mcp_servers")
