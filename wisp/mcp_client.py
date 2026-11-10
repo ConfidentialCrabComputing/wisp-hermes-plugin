@@ -1,6 +1,6 @@
 """The plugin's own short MCP client: one tool call on Wisp's endpoint over Streamable HTTP.
 
-It runs before Hermes connects its MCP servers (at the plugin's load) and from `/wisp_model`, so it
+It runs before Hermes connects its MCP servers (at the plugin's load) and from `/wisp-model`, so it
 cannot borrow Hermes's client. Standard library only. ponytail: no elicitation and no ping replies, which
 only `ask_wisp` and `wisp_result` need; Hermes's own client makes those calls."""
 

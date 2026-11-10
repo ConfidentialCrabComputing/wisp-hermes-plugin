@@ -1,4 +1,4 @@
-"""`/wisp` and `/wisp_model`, the plugin's slash commands, against the fake
+"""`/wisp` and `/wisp-model`, the plugin's slash commands, against the fake
 `hermes`. Run: python3 -m unittest discover -s tests"""
 
 import http.server
@@ -35,14 +35,34 @@ class Commands(unittest.TestCase):
         shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
         self.config = {"plugins": {"enabled": ["wisp"]}}
 
-    def slash(self, name, args, tools=None):
+    def hermes(self, *argv, tools=None):
         (self.home / "config.yaml").write_text(json.dumps(self.config))
         (self.home / "tools.json").write_text(json.dumps(tools or {}))
         env = {**os.environ, "HERMES_HOME": str(self.home), "PATH": f"{FAKE}{os.pathsep}{os.environ['PATH']}"}
         # By its interpreter: Windows does not start a script through its shebang.
-        done = subprocess.run([sys.executable, str(FAKE / "hermes"), "slash", name, args], env=env, capture_output=True, text=True)
+        done = subprocess.run([sys.executable, str(FAKE / "hermes"), *argv], env=env, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout
+
+    def slash(self, name, args, tools=None):
+        """`/<name> args` typed in the CLI."""
+        return self.hermes("slash", name, args, tools=tools)
+
+    def message(self, name, args):
+        """`/<name> args` sent to a gateway (Telegram, Slack, ...)."""
+        return self.hermes("message", name, args)
+
+    def test_every_command_is_found_on_every_surface(self):
+        names = json.loads(self.hermes("python", "import json; print(json.dumps(list(load_plugin().commands)))"))
+
+        self.assertIn("wisp", names)
+        for name in names:
+            # Telegram's menu offers a hyphen as an underscore; other gateways send it as typed.
+            for shown in {name.replace("-", "_"), name}:
+                with self.subTest(message=shown):
+                    self.assertNotIn("Unknown command", self.message(shown, ""))
+            with self.subTest(slash=name):
+                self.assertNotIn("Unknown command", self.slash(name, ""))
 
     def dispatched(self):
         try:
@@ -120,22 +140,24 @@ class Commands(unittest.TestCase):
     def test_wisp_model_calls_the_endpoints_wisp_model_with_its_args_and_shows_its_answer(self):
         calls = self.endpoint("Model: balanced (thinking off).")
 
-        shown = self.slash("wisp_model", "balanced")
+        shown = {"cli": self.slash("wisp-model", "balanced"), "telegram": self.message("wisp_model", "balanced")}
 
         # The plugin's load also asks `wisp_zone`.
-        self.assertEqual([call for call in calls if call["name"] == "wisp_model"], [{"authorization": f"Bearer {CREDENTIAL}", "name": "wisp_model",
+        self.assertEqual([call for call in calls if call["name"] == "wisp_model"], 2 * [{"authorization": f"Bearer {CREDENTIAL}", "name": "wisp_model",
                                   "arguments": {"args": "balanced"}}])
-        self.assertIn("Model: balanced (thinking off).", shown)
+        for surface, text in shown.items():
+            with self.subTest(surface=surface):
+                self.assertIn("Model: balanced (thinking off).", text)
 
     def test_wisp_model_on_a_malformed_answer_says_it_failed(self):
         for body in (b"[]", b"5", b'{"result": "x"}', b'{"result": {"isError": true, "content": "x"}}'):
             with self.subTest(body=body):
                 self.endpoint(None, raw=body)
 
-                self.assertIn("Wisp's wisp_model failed: ", self.slash("wisp_model", ""))
+                self.assertIn("Wisp's wisp_model failed: ", self.slash("wisp-model", ""))
 
     def test_wisp_model_without_a_connected_endpoint_says_so(self):
-        shown = self.slash("wisp_model", "")
+        shown = self.slash("wisp-model", "")
 
         self.assertIn("hermes wisp connect", shown)
 
