@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 REFUSAL = {"action": "block", "message": "This goes through Wisp — use ask_wisp."}
 FILE_TOOLS = {"read_file", "write_file", "patch", "search_files"}
 WRITE_TOOLS = {"write_file", "patch"}
+# Wisp's tools as Hermes's model calls them (`mcp__<server>__<tool>`).
+WISP_TOOLS = {"mcp__wisp__ask_wisp", "mcp__wisp__wisp_result"}
 # The argument that holds what a code tool runs.
 CODE_TOOLS = {"terminal": "command", "execute_code": "code"}
 # Between the words of a command, as a shell or a Python argv list (`["hermes", "plugins", ...]`) spells it.
@@ -59,11 +61,11 @@ def _moved_names(moved):
     return [name for name in moved if isinstance(name, str) and _SERVER_NAME.fullmatch(name)]
 
 
-def make_hook(zone, config_path, moved=(), unconnected=lambda: None):
+def make_hook(zone, config_path, moved=(), unavailable=lambda: None):
     """The hook for `zone` (None: only the switch-off attempts are refused); `config_path` is Hermes's
     `config.yaml`, whose `plugins` section enables this plugin; `moved` names Hermes's MCP servers
-    switched off because Wisp holds them now; `unconnected()`, asked at each refusal, what to refuse with
-    instead of `ask_wisp` while there is none (None while Wisp is connected)."""
+    switched off because Wisp holds them now; `unavailable()`, asked at each refusal, what to refuse with
+    instead of `ask_wisp` while there is no Wisp to ask (None while Wisp is connected and answers)."""
     given = ([zone["dataDir"], zone["deskRoot"], *(f["path"] for f in zone.get("privateFolders") or []),
               *(zone.get("secretFiles") or [])] if zone else [])
     home = os.path.expanduser("~")
@@ -99,14 +101,19 @@ def make_hook(zone, config_path, moved=(), unconnected=lambda: None):
         return any(real == folder or real.startswith(folder + os.sep) for folder in among)
 
     def pre_tool_call(tool_name, args, **_):
-        if refused(tool_name, args) is None:
+        # Wisp's own tools pass unless there is no Wisp to ask: a session keeps the tool list it started with, and
+        # Hermes would answer a call to a parked server's tool with an error saying nothing of Wisp.
+        wisps = tool_name in WISP_TOOLS
+        if not wisps and refused(tool_name, args) is None:
             return None
         try:
-            message = unconnected()
+            message = unavailable()
         except Exception as exc:  # noqa: BLE001 — a refusal that raises would still block, naming nothing
-            logger.warning("Wisp: could not tell whether Wisp is connected: %r", exc)
+            logger.warning("Wisp: could not tell whether Wisp is there: %r", exc)
             message = None
-        return {"action": "block", "message": message} if message else REFUSAL
+        if message:
+            return {"action": "block", "message": message}
+        return None if wisps else REFUSAL
 
     def refused(tool_name, args):
         if tool_name in FILE_TOOLS:

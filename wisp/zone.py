@@ -160,10 +160,28 @@ files, and you cannot reach them. {not_connected(pinned)}
 Say so whenever the user asks for Wisp or for anything Wisp does, and do not do the task another way."""
 
 
-def session_rule(zone, url, credential, cache):
+def not_answering():
+    """What the hook refuses with, and the rule says, while Wisp is connected but does not answer: its Runtime is
+    stopped or restarting, or its endpoint cannot be reached. `ask_wisp` comes back by itself once it answers."""
+    return ("Wisp is not answering right now (its Runtime is stopped or restarting, or its endpoint cannot be "
+            "reached): tell the user so, and that Wisp is usually back within a minute; do not do the task another way.")
+
+
+def not_answering_rule(zone):
+    """The routing rule while Wisp does not answer: what is Wisp's, from `zone` when there is one, and that it waits."""
+    if zone:
+        return routing_rule(zone, answering=False)
+    return f"""# Wisp
+Wisp is the user's private agent: it holds the keys to the user's sensitive accounts and reads their private
+files, and you cannot reach them. {not_answering()}
+Say so whenever the user asks for Wisp or for anything Wisp does."""
+
+
+def session_rule(zone, url, credential, cache, answering=True):
     """The routing rule for a session starting now: `zone`'s folders as of Hermes's start (the sandbox closes a folder
     only at a start, so a rule naming one added since would call closed a folder Hermes can still open) with the
-    Connectors the endpoint names now, or the cache's when it does not answer, or the start's."""
+    Connectors the endpoint names now, or the cache's when it does not answer, or the start's. Not `answering`, the
+    endpoint is not asked."""
     def answered():
         if not (url and credential):
             raise ValueError("no endpoint or credential")
@@ -173,24 +191,26 @@ def session_rule(zone, url, credential, cache):
         return json.loads(cache.read_text())
 
     folders = {key: value for key, value in zone.items() if key not in ("services", "connectors")}
-    for read in (answered, cached):
+    for read in (answered, cached) if answering else (cached,):
         try:
             answer = read()
             return routing_rule({**folders, "services": answer.get("services") or [],
-                                 **({"connectors": answer["connectors"]} if "connectors" in answer else {})})
+                                 **({"connectors": answer["connectors"]} if "connectors" in answer else {})}, answering)
         except Exception as exc:  # noqa: BLE001 — anything read here is data; the start's rule stands in
             logger.warning("Wisp: no Connectors %s (%r)", read.__name__, exc)
-    return routing_rule(zone)
+    return routing_rule(zone, answering)
 
 
-def routing_rule(zone):
-    """The system prompt section that sends Wisp's tasks to `ask_wisp`, within Hermes's section cap: what
-    does not fit is counted, not listed."""
+def routing_rule(zone, answering=True):
+    """The system prompt section that sends Wisp's tasks to `ask_wisp` (not `answering`: that names them as Wisp's
+    and says Wisp does not answer), within Hermes's section cap: what does not fit is counted, not listed."""
+    send = ("""Hand these tasks to the `ask_wisp` tool instead of doing them
+yourself, and relay Wisp's answer; continue a Wisp conversation by passing its `conversation` id back to
+`ask_wisp`:""" if answering else f"""{not_answering()}
+These tasks are Wisp's:""")
     head = f"""# Wisp
 Wisp is the user's private agent. It holds the keys to the user's sensitive accounts and reads their
-private files; you cannot reach them. Hand these tasks to the `ask_wisp` tool instead of doing them
-yourself, and relay Wisp's answer; continue a Wisp conversation by passing its `conversation` id back to
-`ask_wisp`:
+private files; you cannot reach them. {send}
 - anything that reads or changes a file in Wisp's data directory {_inert(zone["dataDir"])} or under its
 Desk root {_inert(zone["deskRoot"])};"""
     if "connectors" in zone:

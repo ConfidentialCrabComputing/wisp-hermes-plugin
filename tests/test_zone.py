@@ -308,6 +308,55 @@ Desk root /home/u/.wisp/desks;
         self.assertEqual(len(calls), 2)
         self.assertIn("Wisp's services: notion;", rule)
 
+    def test_a_stopped_runtime_a_new_session_is_told_wisp_is_not_answering_never_to_do_the_task_itself(self):
+        # Connected, Hermes's MCP client still holding `wisp`, and nothing listening on its loopback endpoint.
+        rule, refusal = self.told(FAKE_HERMES_WISP_STATUS="connected")
+
+        self.assertIn("Wisp is not answering", rule)
+        self.assertIn("do not do", rule)
+        self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn("/home/u/bank", rule)
+        self.assertIn("Wisp is not answering", refusal)
+
+    def asked_wisp(self, **env):
+        """What the hook answers an `ask_wisp` call, as an open session whose tool list still has it makes one."""
+        call = [["mcp__wisp__ask_wisp", {"task": "How many unread emails do I have?"}]]
+        return json.loads(self.hermes("pre-tool-call", input=json.dumps(call), **env))[0]
+
+    def test_wisp_parked_by_hermes_the_rule_and_an_ask_wisp_call_say_wisp_is_not_answering(self):
+        self.answers(ZONE)
+        parked = {"FAKE_HERMES_WISP_STATUS": "failed"}
+
+        rule = json.loads(self.hermes("sections", **parked))["wisp-routing"]
+
+        self.assertIn("Wisp is not answering", rule)
+        self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn("Wisp is not answering", self.asked_wisp(**parked))
+
+    def test_wisp_connected_and_answering_gets_the_routing_rule_and_ask_wisp_proceeds(self):
+        self.answers(ZONE)
+        connected = {"FAKE_HERMES_WISP_STATUS": "connected"}
+
+        rule = json.loads(self.hermes("sections", **connected))["wisp-routing"]
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIsNone(self.asked_wisp(**connected))
+
+    def test_wisp_parked_by_hermes_is_reconnected_soon_after_its_endpoint_answers_with_no_restart(self):
+        # Hermes's own retry of a parked server comes every 300 s.
+        self.answers(ZONE)
+        reconnects = self.home / "reconnect.log"
+        # A running Hermes, the plugin loaded, for up to 15 s or until it asks for a reconnect.
+        running = f"""load_plugin()
+import os, time
+deadline = time.monotonic() + 15
+while time.monotonic() < deadline and not os.path.exists({str(reconnects)!r}):
+    time.sleep(0.2)
+"""
+        self.hermes("python", running, FAKE_HERMES_WISP_STATUS="failed")
+
+        self.assertEqual(reconnects.read_text(), "wisp\n")
+
     def test_the_zone_call_to_a_loopback_endpoint_never_goes_through_a_proxy(self):
         proxied = []
 

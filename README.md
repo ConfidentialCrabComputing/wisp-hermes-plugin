@@ -106,6 +106,14 @@ from a terminal, with `wisp integrate hermes --connectors`.
 - A sandbox start that fails leaves Hermes running without the sandbox, saying so on stderr and in the log. Exiting
   instead would keep Hermes from starting. A process left from an earlier Hermes, or an `LD_PRELOAD` in its `.env`, can
   use this at the next start.
+- While Wisp's Runtime is stopped or restarting (every `wisp update` restarts it), or its endpoint cannot be reached,
+  Hermes says Wisp is not answering and does not do Wisp's tasks another way. After a few failed reconnects Hermes parks
+  the `wisp` server and retries it only every 5 minutes, so the plugin asks Hermes to reconnect it every 10 seconds:
+  once a Runtime on this machine (or its `ssh -L` tunnel) takes connections again, and at each try for a Runtime on
+  another machine. An open session gets `ask_wisp` back from its next message, but a session that started while Wisp
+  was not answering keeps that in its prompt, so start a new one (`/new`). If Wisp is still unavailable in Hermes while
+  `hermes mcp test wisp` succeeds, restart Hermes (`hermes gateway restart`). Under a gateway that serves several
+  profiles, only the default profile is reconnected this way; the others wait for Hermes's own 5-minute retry.
 - On Windows the plugin is for connecting to a Wisp on another machine. A zone on the same Windows machine is not
   protected: there is no sandbox, and the check on Hermes's tool calls is untested there.
 
