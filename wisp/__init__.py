@@ -1,5 +1,5 @@
 """Wisp's Hermes plugin: at Hermes's start, the sandbox, the routing rule from Wisp's zone and the
-`pre_tool_call` hook that refuses reaching into it; `hermes wisp connect`; `/wisp` and `/wisp_model`."""
+`pre_tool_call` hook that refuses reaching into it; `hermes wisp connect`; `/wisp` and `/wisp-model` (`/wisp_model` in Telegram)."""
 
 import json
 import logging
@@ -38,8 +38,9 @@ def register(ctx):
         description="hermes wisp connect <url> registers the Runtime's MCP endpoint; --remove undoes it.")
     ctx.register_command("wisp", lambda raw_args: commands.wisp(ctx, raw_args),
                          description="Hand a task to Wisp directly", args_hint="<task>")
-    # An underscore, not a hyphen: Telegram's command menu takes only [a-z0-9_].
-    ctx.register_command("wisp_model", commands.wisp_model,
+    # A hyphen, not an underscore: a gateway looks a typed name up with `_` made `-`, so Telegram's menu (which
+    # shows it as `/wisp_model`) and the CLI (`/wisp-model`) both find it; `wisp_model` no gateway could reach.
+    ctx.register_command("wisp-model", commands.wisp_model,
                          description="Show or set the model Wisp uses for Hermes's tasks",
                          args_hint="[advanced|balanced|<model id>|thinking on|off|reset]")
     zone = None

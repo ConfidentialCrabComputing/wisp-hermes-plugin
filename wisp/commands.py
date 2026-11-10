@@ -1,4 +1,4 @@
-"""`/wisp <task>` and `/wisp_model [args]`, the plugin's slash commands in every Hermes surface."""
+"""`/wisp <task>` and `/wisp-model [args]` (`/wisp_model` in Telegram), the plugin's slash commands in every Hermes surface."""
 
 import json
 
