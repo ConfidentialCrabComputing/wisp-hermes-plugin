@@ -320,10 +320,10 @@ for path in ({str(self.plugin / "__init__.py")!r}, {str(self.plugin / "zone.json
         self.assertEqual(done.stdout.split(), ["refused"] * 3)
 
     @macos
-    def test_connect_remove_inside_the_sandbox_finishes_and_names_the_cache_it_cannot_delete(self):
+    def test_connect_remove_inside_the_sandbox_finishes_and_says_nothing_of_the_cache_it_keeps(self):
         done = self.hermes("wisp", "connect", "--remove")
 
-        self.assertIn(str(self.plugin / "zone.json"), done.stdout)
+        self.assertNotIn("zone.json", done.stdout + done.stderr)
 
     @sandboxed
     def test_the_browser_runs_without_chromes_own_sandbox_after_the_users_own_args(self):
