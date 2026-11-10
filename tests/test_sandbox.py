@@ -218,6 +218,35 @@ for old, new in (({str(parent)!r}, {str(self.tmp / "docs2")!r}), ({str(self.tmp)
 
         self.assertEqual(done.stdout.split(), ["refused", "refused"])
 
+    @macos
+    def test_a_parent_the_sandbox_keeps_in_place_answers_access_chmod_and_new_files_as_without_it(self):
+        # Empty, as an absent Private Folder's parent can be: only the sandbox stands between it and an `rmdir`.
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        self.zone["privateFolders"].append({"path": str(empty / "taxes")})
+        parents = [self.plugin.parent, self.home, self.tmp, empty]
+
+        done = self.python(f"""
+import os
+load_plugin()
+for parent in {[str(p) for p in parents]!r}:
+    said = [os.access(parent, os.W_OK)]
+    try:
+        os.chmod(parent, 0o700)
+        open(os.path.join(parent, "new.txt"), "w").write("new")
+        said.append("changed")
+    except OSError as exc:
+        said.append(repr(exc))
+    for move in (lambda: os.rename(parent, parent + ".moved"), lambda: os.rmdir(parent)):
+        try:
+            move()
+            said.append("moved")
+        except OSError:
+            said.append("refused")
+    print(*said)""")
+
+        self.assertEqual(done.stdout.splitlines(), ["True changed refused refused"] * len(parents), done.stderr)
+
     @sandboxed
     def test_wisps_data_directory_and_desk_root_are_refused(self):
         self.assertFalse(self.readable(self.data_dir / "secret.txt"))
