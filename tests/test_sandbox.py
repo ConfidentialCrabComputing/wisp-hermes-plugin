@@ -680,7 +680,7 @@ except OSError:
 
         self.assertEqual(done.stdout.strip(), "refused")
         self.assertIn(UNPROTECTED, done.stderr)
-        self.assertIn("File name too long", done.stderr)
+        self.assertIn(f"bubblewrap could not mount {key}", done.stderr)
 
     @linux
     @sandboxed
