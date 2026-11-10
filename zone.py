@@ -64,6 +64,11 @@ def _folders(zone):
     return [zone["dataDir"], zone["deskRoot"], *(folder["path"] for folder in zone.get("privateFolders") or [])]
 
 
+def _secret_files(zone):
+    """The files outside its data directory the Runtime reads its secrets from; none from a Runtime older than them."""
+    return list(zone.get("secretFiles") or [])
+
+
 def _well_formed(path):
     """An absolute string the kernel can take as a path: a NUL byte or a lone surrogate raises where it is used (strictly
     encoded, as macOS's profile needs and Linux's nested re-exec, through a Node that must decode it the same)."""
@@ -74,8 +79,8 @@ def _well_formed(path):
 
 
 def _answered_folders(answer):
-    """The folders of `answer`, the whole of it checked; raises when it cannot widen a pinned zone."""
-    folders = _folders(answer)
+    """The folders and secret files of `answer`, the whole of it checked; raises when it cannot widen a pinned zone."""
+    folders = [*_folders(answer), *_secret_files(answer)]
     if len(folders) > ZONE_FOLDERS:
         raise ValueError(f"past {ZONE_FOLDERS} folders")
     if bad := [path for path in folders if not _well_formed(path)]:
@@ -87,12 +92,14 @@ def _answered_folders(answer):
 
 def widen(pin, answer):
     """The pinned zone with whatever `answer`, if any, adds to it: an answer widens the zone, never narrows it."""
-    pinned = _folders(pin)
+    pinned = [*_folders(pin), *_secret_files(pin)]
     answered = [] if answer is None else _answered_folders(answer)
     added = [path for path in dict.fromkeys(answered) if path not in pinned]
     given = answer or {}
+    files = _secret_files(given)
     return {"dataDir": pin["dataDir"], "deskRoot": pin["deskRoot"],
-            "privateFolders": [*pin["privateFolders"], *({"path": path} for path in added)],
+            "privateFolders": [*pin["privateFolders"], *({"path": path} for path in added if path not in files)],
+            "secretFiles": [*_secret_files(pin), *(path for path in added if path in files)],
             "services": given.get("services") or [],
             **({"connectors": given["connectors"]} if "connectors" in given else {})}
 

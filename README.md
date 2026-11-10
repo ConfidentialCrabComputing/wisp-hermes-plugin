@@ -31,7 +31,9 @@ sandbox and no `wisp doctor` here.
 ## One machine
 
 Don't install from here: `wisp integrate hermes` lays out the copy embedded in the `wisp` binary (this repository's
-committed code) in every Hermes profile, connects it over loopback, and sandboxes Hermes away from Wisp's zone.
+committed code) in every Hermes profile, connects it over loopback, and sandboxes Hermes away from Wisp's zone: its data
+directory, the Desk root, the Private Folders and the files outside them Wisp reads its secrets from (`wisp serve
+--config`, `WISP_MASTER_KEY_FILE`). On Linux such a file reads as empty inside the sandbox, and a write to it goes nowhere.
 
 ### Asked from a chat
 

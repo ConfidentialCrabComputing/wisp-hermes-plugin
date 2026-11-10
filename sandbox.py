@@ -68,8 +68,10 @@ def _sandboxed(denied, plugin_dir):
         mounts = _mounts()
     except OSError:
         return False
+    # A folder is under a tmpfs, a secret file under a read-only bind of `/dev/null`; a missing path has neither.
     return (mounts.get(plugin_dir, (None, False))[1]
-            and all(mounts.get(folder, (None,))[0] == b"tmpfs" for folder in denied if os.path.isdir(folder)))
+            and all(mounts.get(path, (None,))[0] == b"tmpfs" if os.path.isdir(path) else mounts.get(path, (None, False))[1]
+                    for path in denied if os.path.exists(path)))
 
 
 def _loads_code(name):
@@ -320,7 +322,10 @@ def apply(denied, plugin_dir, wisp):
 
 
 def _zone_folders(zone):
-    return [zone["dataDir"], zone["deskRoot"], *(folder["path"] for folder in zone["privateFolders"])]
+    """The zone's folders, then the Runtime's secret files: each denied as a path, which on macOS covers a file as it
+    does a folder, and on Linux `wisp sandbox-exec` covers by what it finds there."""
+    return [zone["dataDir"], zone["deskRoot"], *(folder["path"] for folder in zone["privateFolders"]),
+            *(zone.get("secretFiles") or [])]
 
 
 def _within(path, folder):
