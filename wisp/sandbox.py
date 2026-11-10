@@ -5,6 +5,7 @@ profile's gateway service, its cron, the dashboard) is covered and every child i
 import ctypes
 import importlib.util
 import json
+import logging
 import os
 import re
 import secrets
@@ -220,6 +221,19 @@ def _check_repeated(denied, plugin_dir, wisp):
     return problem
 
 
+def _release_own_chats():
+    """The chats this process holds in Hermes's registry, let go before it becomes the supervisor. Hermes takes a
+    chat's holder for alive while its PID and start time are, and the supervisor keeps both: a chat open when the
+    plugin loads under a running gateway (enabled live) would stay locked to the sandboxed Hermes until a restart.
+    At a cold start this process holds none. Never an exception: the re-exec goes on either way.
+    ponytail: Hermes's own sweep keeps a chat opened in its last 30 seconds; such a chat still needs `/restart`."""
+    try:
+        from hermes_cli.active_sessions import release_orphaned_leases
+        release_orphaned_leases(set())
+    except Exception as exc:  # noqa: BLE001 — an older or rewritten Hermes costs the re-exec nothing
+        logging.getLogger(__name__).warning("Wisp: could not release this process's open chats: %r", exc)
+
+
 def _reexec(denied, plugin_dir, wisp):
     """Linux: this Hermes started again under bubblewrap, with the arguments `wisp sandbox-exec` prints, and this
     process, keeping its PID, turned into the supervisor (`supervise.py`); the reason it could not or a folder was
@@ -281,6 +295,7 @@ def _reexec(denied, plugin_dir, wisp):
         return f"wisp sandbox-exec failed: bubblewrap exited {started.wait()}"
     if notify is not None:
         os.set_inheritable(notify.fileno(), True)
+    _release_own_chats()
     try:
         # `-I` drops `PYTHON*`, not the loader's variables. Its `NOTIFY_SOCKET` stays systemd's own.
         os.execve(sys.executable, [sys.executable, "-I", "-S", os.path.join(plugin_dir, "supervise.py"),

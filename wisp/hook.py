@@ -19,7 +19,8 @@ _SEP = r"[\s'\",]+"
 # Bounded, so a long line repeating "hermes" stays linear: Hermes abandons a slow hook but cannot stop it.
 # ponytail: "hermes" anywhere on the line, so `git log --grep="hermes gateway install"` is refused too.
 # A restart passes: this plugin sandboxes Hermes at every start, and a plugin installed with new
-# dependencies loads only after one.
+# dependencies loads only after one. It is for Hermes's CLI or a terminal: inside a supervised gateway,
+# Hermes's own terminal guard refuses `hermes gateway restart` before this hook sees it.
 _SWITCH_OFF = re.compile(
     rf"\bhermes[^\n;|&]{{0,200}}?\b(plugins{_SEP}(disable|remove|rm|uninstall){_SEP}wisp"
     rf"|config{_SEP}(set|unset){_SEP}plugins|gateway{_SEP}install)\b")
