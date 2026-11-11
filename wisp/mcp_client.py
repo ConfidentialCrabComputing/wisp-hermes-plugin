@@ -176,6 +176,9 @@ def _answer(response, request_id, left, reply):
     # while the user takes their time, as the server takes an unanswered one for a dropped connection. Either thread's
     # failure comes back here, where it ends the call.
     events = queue.Queue()
+    closed = McpError("the endpoint closed the stream without an answer")
+    if response.isclosed():  # an empty body: no socket left to read
+        raise closed
 
     def background(work):
         def run():
@@ -188,11 +191,20 @@ def _answer(response, request_id, left, reply):
     def read():
         for line in _lines(response, left):
             events.put(line)
-        events.put(McpError("the endpoint closed the stream without an answer"))
+        events.put(closed)
+
+    # One asker, the elicitations in turn, as the server asks them: an endpoint sending many gets no thread or
+    # question in the chat per elicitation, and none is asked once the call has ended.
+    asks, ended = queue.Queue(), threading.Event()
+
+    def ask():
+        while (message := asks.get()) is not None and not ended.is_set():
+            reply(message)
 
     # A duplicate of the connection's socket, taken before the reader can end it (its family plays no part).
     stream = socket.fromfd(response.fileno(), socket.AF_INET, socket.SOCK_STREAM)
     background(read)
+    background(ask)
     try:
         while True:
             try:
@@ -209,12 +221,14 @@ def _answer(response, request_id, left, reply):
             if "method" in message:
                 if "id" in message and isinstance(message["method"], str):
                     if message["method"] == "elicitation/create":
-                        background(lambda message=message: reply(message))
+                        asks.put(message)
                     else:
                         reply(message)
             elif message.get("id") == request_id:
                 return message
     finally:
+        ended.set()
+        asks.put(None)
         # Ends the reader's read: the response's close would otherwise wait on it until the stream next speaks.
         with stream:
             try:
