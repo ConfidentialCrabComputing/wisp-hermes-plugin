@@ -1,7 +1,9 @@
 """`/wisp <task>` and `/wisp-model [args]` (`/wisp_model` in Telegram), the plugin's slash commands in every Hermes surface."""
 
+import errno
 import json
 import re
+import socket
 import urllib.error
 
 from .mcp_client import McpError, call_tool
@@ -43,8 +45,16 @@ def wisp(ctx, raw_args, unavailable=lambda: None):
                 result = call_tool(*endpoint, tool, args, timeout=WAIT, elicit=lambda message: _ask(ctx, message))
             except urllib.error.HTTPError as exc:  # Wisp answered: its word, not that it is down
                 return {"error": f"Wisp's {tool} failed: {exc}"}
-            except OSError:  # refused, reset, timed out: on the way to Wisp, so it is not answering
-                return {"error": not_answering()}
+            except OSError as exc:
+                # urllib wraps a failed connect in a URLError whose `reason` is the socket's error.
+                reason = getattr(exc, "reason", exc)
+                if isinstance(reason, (ConnectionRefusedError, socket.gaierror)) or \
+                        getattr(reason, "errno", None) in (errno.EHOSTUNREACH, errno.ENETUNREACH):
+                    return {"error": not_answering()}  # the request never reached Wisp
+                # Reached Wisp, maybe started a Run: "not answering, try again" would start it twice.
+                if isinstance(reason, TimeoutError):
+                    return {"error": f"Wisp's {tool} failed: it timed out ({exc}); the task may still be running in Wisp"}
+                return {"error": f"Wisp's {tool} failed: {exc}"}
             except (McpError, ValueError) as exc:
                 return {"error": f"Wisp's {tool} failed: {exc}"}
             structured = result.get("structuredContent")

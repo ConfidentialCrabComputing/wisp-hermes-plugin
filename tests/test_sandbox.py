@@ -1013,8 +1013,9 @@ class Pin(HermesHome):
             (self.plugin / "pin.json").write_text(json.dumps(self.pin))
         return super().hermes(*argv, **kwargs)
 
-    def endpoint(self, zone):
-        """A fake Wisp MCP endpoint whose `wisp_zone` answers `zone`; its URL. The tools asked for go to `self.called`."""
+    def endpoint(self, zone, down=None, seal_fails=None):
+        """A fake Wisp MCP endpoint whose `wisp_zone` answers `zone`; its URL. The tools asked for go to `self.called`.
+        While the file `down` exists `wisp_zone` answers no zone; while `seal_fails` exists `wisp_sealed` fails."""
         called = self.called = []
 
         class Mcp(http.server.BaseHTTPRequestHandler):
@@ -1024,9 +1025,16 @@ class Pin(HermesHome):
                     self.send_response(202)
                     self.end_headers()
                     return
-                if message["method"] == "tools/call":
-                    called.append(message["params"]["name"])
-                result = ({"content": [], "structuredContent": zone} if message["method"] == "tools/call"
+                tool = message["params"]["name"] if message["method"] == "tools/call" else None
+                if tool:
+                    called.append(tool)
+                if tool == "wisp_sealed" and seal_fails and seal_fails.exists():
+                    self.send_response(500)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                answer = None if tool == "wisp_zone" and down and down.exists() else zone
+                result = ({"content": [], "structuredContent": answer} if tool
                           else {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "wisp"}})
                 body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
                 self.send_response(200)
@@ -1115,6 +1123,28 @@ class Pin(HermesHome):
         done = self.python("load_plugin(); load_plugin()")
 
         self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+
+    @sandboxed
+    def test_a_load_from_the_cache_then_one_beside_a_live_runtime_asks_once_on_the_live_load(self):
+        down = self.tmp / "down"
+        down.touch()
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]), down=down)
+        (self.plugin / "zone.json").write_text(json.dumps(self.valid_zone([self.bank])))
+
+        done = self.python(f"load_plugin(); import os; os.remove({str(down)!r}); load_plugin()")
+
+        self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+        self.assertEqual(self.called[-1], "wisp_sealed")
+
+    @sandboxed
+    def test_a_load_whose_replacement_failed_asks_again_on_the_next_load(self):
+        fails = self.tmp / "seal-fails"
+        fails.touch()
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]), seal_fails=fails)
+
+        done = self.python(f"load_plugin(); import os; os.remove({str(fails)!r}); load_plugin()")
+
+        self.assertEqual(self.called.count("wisp_sealed"), 2, done.stderr)
 
     def test_an_unsandboxed_start_never_asks_to_replace_the_token(self):
         elsewhere = self.tmp / "elsewhere"

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -280,6 +281,22 @@ class Commands(unittest.TestCase):
 
         self.assertIn("Wisp is not answering", shown)
         self.assertNotIn("urlopen error", shown)
+
+    def test_wisp_on_a_gateway_that_outlasts_its_wait_after_wisp_took_it_says_it_timed_out_never_not_answering(self):
+        # The Run exists: "not answering, try again" would have the user start it twice.
+        self.asking_endpoint({"ask_wisp": [lambda action: time.sleep(2) or text("paid")]})
+
+        shown = self.hermes("python", """
+import sys
+sys.modules["__main__"].SURFACE = "telegram"
+ctx = load_plugin()
+sys.modules["hermes_plugins_wisp.commands"].WAIT = 0.5
+print(ctx.commands["wisp"]("pay the bill"))""", choice="Allow for this task")
+
+        self.assertEqual([question for question, _choices in self.asked()], ["Run bash_run: echo tg-ok"])
+        self.assertNotIn("Wisp is not answering", shown)
+        self.assertIn("Wisp's ask_wisp failed", shown)
+        self.assertIn("timed out", shown)
 
     def test_wisp_on_a_gateway_without_a_connected_endpoint_says_so(self):
         self.assertIn("hermes wisp connect", self.message("wisp", "summarise my mail"))
