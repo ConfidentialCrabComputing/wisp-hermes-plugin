@@ -302,6 +302,45 @@ print(ctx.commands["wisp"]("pay the bill"))""")
                 self.assertNotIn("may still be running", shown)
                 self.assertNotIn("urlopen error", shown)
 
+    def test_wisp_on_a_gateway_that_cannot_reach_wisp_result_says_the_task_may_still_be_running(self):
+        # The Run exists: "not answering, try again" would have the user start it twice.
+        self.config["mcp_servers"] = {"wisp": {"url": "http://127.0.0.1:9/mcp"}}
+        (self.home / ".env").write_text(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}\n")
+
+        shown = self.hermes("python", """
+import sys, urllib.error
+sys.modules["__main__"].SURFACE = "telegram"
+ctx = load_plugin()
+def call_tool(url, credential, tool, args, **kwargs):
+    if tool == "ask_wisp":
+        return {"content": [{"type": "text", "text": "still at work"}], "structuredContent": {"run": "r1"}}
+    raise urllib.error.URLError(TimeoutError())
+sys.modules["hermes_plugins_wisp.commands"].call_tool = call_tool
+print(ctx.commands["wisp"]("pay the bill"))""")
+
+        self.assertNotIn("Wisp is not answering", shown)
+        self.assertIn("may still be running", shown)
+
+    def test_wisp_on_a_gateway_that_cannot_send_a_confirmations_answer_says_the_task_may_still_be_running(self):
+        # The Run exists and waits on the Confirmation.
+        self.asking_endpoint({"ask_wisp": [lambda action: text("paid")]})
+
+        shown = self.hermes("python", """
+import json, sys, urllib.error
+sys.modules["__main__"].SURFACE = "telegram"
+ctx = load_plugin()
+client = sys.modules["hermes_plugins_wisp.mcp_client"]
+opened = client._open
+def unreached_answers(request, **kwargs):
+    if request.data and "method" not in json.loads(request.data):
+        raise urllib.error.URLError(ConnectionRefusedError())
+    return opened(request, **kwargs)
+client._open = unreached_answers
+print(ctx.commands["wisp"]("pay the bill"))""", choice="Allow for this task")
+
+        self.assertNotIn("Wisp is not answering", shown)
+        self.assertIn("may still be running", shown)
+
     def test_wisp_on_a_gateway_that_outlasts_its_wait_after_wisp_took_it_says_it_timed_out_never_not_answering(self):
         # The Run exists: "not answering, try again" would have the user start it twice.
         self.asking_endpoint({"ask_wisp": [lambda action: time.sleep(2) or text("paid")]})
