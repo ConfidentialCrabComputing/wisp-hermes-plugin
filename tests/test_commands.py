@@ -37,6 +37,13 @@ def running(run, conversation="s1"):
             "structuredContent": {"run": run, "conversation": conversation}}
 
 
+class Raw:
+    """A `tools/call` answered as sent: `status`, `content_type` and `body`, then the connection closed."""
+
+    def __init__(self, body=b"", content_type="text/event-stream", status=200):
+        self.body, self.content_type, self.status = body, content_type, status
+
+
 class Commands(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-commands-"))
@@ -209,6 +216,12 @@ class Commands(unittest.TestCase):
                 calls.append([params["name"], params["arguments"]])
                 # The plugin's load asks `wisp_zone` too.
                 answer = (answers.get(params["name"]) or [{"content": []}]).pop(0)
+                if isinstance(answer, Raw):
+                    self.send_response(answer.status)
+                    self.send_header("Content-Type", answer.content_type)
+                    self.end_headers()
+                    self.wfile.write(answer.body)
+                    return  # HTTP/1.0: the connection's close ends the body
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -415,6 +428,47 @@ print(ctx.commands[{command!r}]({args!r}))""")
         self.assertIn("may still be running", shown)
         self.assertNotIn("Wisp is not answering", shown)
         self.assertNotIn("Traceback", shown)
+
+    def assert_may_still_run(self, shown, tool="ask_wisp"):
+        self.assertIn(f"Wisp's {tool} failed", shown)
+        self.assertIn("may still be running", shown)
+        self.assertNotIn("Wisp is not answering", shown)
+        self.assertNotIn("Traceback", shown)
+
+    def test_wisp_on_a_gateway_whose_answer_never_comes_whole_says_the_task_may_still_be_running(self):
+        # Wisp took the call and may have started its Run: only Wisp's own answer says it did not.
+        for case, answer in {
+            "a stream that ends cleanly with no answer": Raw(b": keep\n\n"),
+            "a JSON body cut short": Raw(b'{"jsonrpc": "2.0", "id": 2, "res', "application/json"),
+            "an SSE line that is not JSON": Raw(b"data: {oops\n\n"),
+            "an answer with neither result nor error": Raw(b'data: {"jsonrpc": "2.0", "id": 2}\n\n'),
+            "a 502 from a hop between": Raw(status=502),
+        }.items():
+            with self.subTest(case=case):
+                self.asking_endpoint({"ask_wisp": [answer]})
+
+                self.assert_may_still_run(self.message("wisp", "pay the bill"))
+
+    def test_wisp_on_a_gateway_whose_wisp_result_fails_by_status_says_the_task_may_still_be_running(self):
+        # A `wisp_result` follows a Run that exists, a 404 too (a Runtime restarted since).
+        for status in (502, 404):
+            with self.subTest(status=status):
+                self.asking_endpoint({"ask_wisp": [text("still at work", run="r1")], "wisp_result": [Raw(status=status)]})
+
+                self.assert_may_still_run(self.message("wisp", "pay the bill"), "wisp_result")
+
+    def test_wisp_on_a_gateway_that_wisp_refuses_says_it_failed_with_no_warning(self):
+        # Wisp's own answer: no Run exists.
+        error = json.dumps({"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "no task"}}).encode()
+        for case, answer in {"a 401": Raw(status=401), "a JSON-RPC error": Raw(error, "application/json")}.items():
+            with self.subTest(case=case):
+                self.asking_endpoint({"ask_wisp": [answer]})
+
+                shown = self.message("wisp", "pay the bill")
+
+                self.assertIn("Wisp's ask_wisp failed", shown)
+                self.assertNotIn("may still be running", shown)
+                self.assertNotIn("Wisp is not answering", shown)
 
     def test_wisp_model_on_an_answer_that_is_not_http_says_it_failed(self):
         shown = self.breaking("wisp-model", "", "http.client.BadStatusLine('x')")
