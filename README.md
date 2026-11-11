@@ -54,6 +54,9 @@ Then:
 - A Confirmation of `/wisp` is asked in the chat itself (Telegram, Slack, Discord, the TUI, the Desktop), and is denied
   when nobody answers within Hermes's clarify timeout, 90 seconds by default. `agent.clarify_timeout` in Hermes's config
   widens it, for every clarifying question Hermes asks. The task goes on without that tool, and can be asked again.
+- In a group chat, anyone allowed to use your Hermes there can answer that Confirmation, not only whoever ran `/wisp`:
+  Hermes checks who may use the chat, not who asked. Give access to your Hermes only to people you trust to allow a
+  tool on your behalf.
 - A Hermes cron job or `hermes chat -q` has no one to answer, so it can use only the Wisp tools already allowed. Allow
   them beforehand: `wisp permissions set <tool> allow`.
 - With Wisp's Auto Mode on, the Judge answers Hermes's Wisp calls first: Hermes's panel shows only what it escalates, and
