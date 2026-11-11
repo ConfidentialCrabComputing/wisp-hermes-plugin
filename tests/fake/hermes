@@ -14,7 +14,7 @@ names that file, and
 looked up as the CLI does (the name as typed), `hermes message <name> [args]` (not Hermes's) as a gateway
 does for a message (`gateway/run_inbound_hooks.py`: the name with `_` made `-`), and prints what it
 returns, or "Unknown command /<name>" (`ctx.session_surface()` is `cli` for one, `telegram` for the other,
-and `ctx.ask_choice` logs to `$HERMES_HOME/choices.log` and picks the label `FAKE_HERMES_CHOICE`); its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
+and `ctx.ask_choice` logs to `$HERMES_HOME/choices.log` and picks the label `FAKE_HERMES_CHOICE`, tapped `FAKE_HERMES_CHOICE_AFTER` seconds later); its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
 answered, in order, from `$HERMES_HOME/tools.json` ({tool: [handler result, ...]}), as Hermes's registry
 would answer them (a JSON string). `FAKE_HERMES_WISP_STATUS` makes it a Hermes that connects its MCP servers,
 with Hermes's MCP client (`tests/fake/tools`) loaded before the plugin and `wisp` in that status.
@@ -27,6 +27,7 @@ import os
 import shutil
 import signal
 import sys
+import time
 from pathlib import Path
 
 ARGV = sys.argv[1:]
@@ -138,6 +139,7 @@ class Ctx:
         # answers), and the value of the choice it names comes back.
         with open(HOME / "choices.log", "a") as log:
             log.write(json.dumps([question, choices]) + "\n")
+        time.sleep(float(os.environ.get("FAKE_HERMES_CHOICE_AFTER", 0)))
         typed = os.environ.get("FAKE_HERMES_CHOICE", "").strip().casefold()
         for choice in choices:
             value, label = (choice, choice) if isinstance(choice, str) else (choice["value"], choice.get("label") or choice["value"])
