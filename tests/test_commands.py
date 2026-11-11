@@ -44,6 +44,13 @@ class Raw:
         self.body, self.content_type, self.status = body, content_type, status
 
 
+class Stream:
+    """A `tools/call` answered on its SSE stream by `result(handler)`, which may send events of its own first."""
+
+    def __init__(self, result):
+        self.result = result
+
+
 class Commands(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-commands-"))
@@ -172,7 +179,7 @@ class Commands(unittest.TestCase):
 
     def asking_endpoint(self, answers, refuses_answers=False):
         """A fake Wisp MCP endpoint as Wisp's is over Streamable HTTP: each `tools/call` is answered on its own SSE
-        stream, in order, from `answers[tool]`: a `CallToolResult`, or for a call that parks on a Confirmation a
+        stream, in order, from `answers[tool]`: a `CallToolResult`, a `Stream`, or for a call that parks on a Confirmation a
         function of the elicitation's action, asked with a ping while it is open (a ping unanswered within `PING`
         drops the call), and only of a client that declared elicitation
         (else the function gets None, as Wisp's Run then runs under `policy`). Returns the client's answers to the
@@ -225,7 +232,9 @@ class Commands(unittest.TestCase):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
-                if callable(answer):
+                if isinstance(answer, Stream):
+                    answer = answer.result(self)
+                elif callable(answer):
                     action = None
                     if "elicitation" in declared.get(self.headers["Mcp-Session-Id"], {}):
                         ask, ping = f"e{next(ids)}", f"p{next(ids)}"
@@ -280,6 +289,26 @@ class Commands(unittest.TestCase):
         shown = self.hermes("message", "wisp", "Run in your bash exactly: echo tg-ok", choice="Allow for this task",
                             FAKE_HERMES_CHOICE_AFTER=str(2 * PING))
 
+        self.assertIn("tg-ok", shown)
+
+    def test_wisp_on_a_gateway_asks_a_later_calls_confirmation_while_an_earlier_ones_is_still_unanswered(self):
+        def moved_on(handler):
+            """Asks a Confirmation and, once the user sees it, answers that the Run goes on, the question still open."""
+            handler.event({"jsonrpc": "2.0", "id": "e0", "method": "elicitation/create", "params": {
+                "message": "Run bash_run: echo first", "requestedSchema": {"type": "object", "properties": {}}}})
+            deadline = time.monotonic() + 10
+            while not self.asked() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            return text("still at work", run="r1")
+
+        self.asking_endpoint({"ask_wisp": [Stream(moved_on)],
+                              "wisp_result": [lambda action: text("tg-ok" if action == "accept" else f"Denied ({action})")]})
+
+        shown = self.hermes("message", "wisp", "Run in your bash exactly: echo tg-ok", choice="Allow for this task",
+                            FAKE_HERMES_CHOICE_AFTER="2")
+
+        self.assertEqual([question for question, _choices in self.asked()],
+                         ["Run bash_run: echo first", "Run bash_run: echo tg-ok"])
         self.assertIn("tg-ok", shown)
 
     def test_wisp_on_a_gateway_refuses_on_deny_and_never_reports_an_unanswered_confirmation_as_a_decline(self):
