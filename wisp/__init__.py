@@ -174,7 +174,6 @@ def register(ctx):
     live = False  # the pinned endpoint answered `wisp_zone` at this start, not the cache
     rule = ""
     protected = False
-    unread = None  # Wisp on another machine whose zone the start could not read: its URL
     try:
         pin = load_pin(PIN)
         if pin is not None:
@@ -189,7 +188,6 @@ def register(ctx):
                 if loopback(url):
                     _warn(f"{UNPROTECTED}: Wisp's zone could not be read, so Hermes is not sandboxed")
                 else:
-                    unread = url
                     logger.warning("Wisp is not answering at %s", url)
         if zone is not None:
             # After the zone is cached: the sandbox denies writes beside the plugin.
@@ -221,10 +219,21 @@ def register(ctx):
         if unconnected():
             return not_connected_rule(pinned)
         why = down()
+        if zone is None and not pinned:
+            # No zone at the load (connected since, or Wisp down then): asked again for each session, at the URL as of
+            # now, so a Wisp connected or back since is routed to with no restart. The sandbox and the hook stay the
+            # start's; on this machine its "unprotected" warning said so.
+            try:
+                url = ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
+                # With Wisp down, the cache alone: the endpoint is not asked.
+                now = load_zone(None if why else url, credential(), ZONE_CACHE, SESSION_TIMEOUT)
+                if now is None:
+                    return down_rule(None, why or not_answering()) if url else ""
+                return down_rule(now, why) if why else routing_rule(now)
+            except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, as at a load
+                logger.warning("Wisp: no routing rule, the zone is malformed: %r", exc)
+                return ""
         if not rule:
-            # Asked again for each session, so a Wisp back since the start is not called down.
-            if not why and unread and load_zone(unread, credential(), ZONE_CACHE, SESSION_TIMEOUT) is None:
-                why = not_answering()
             return down_rule(None, why) if why else rule
         try:
             # The Connectors as of now: `wisp connectors auth` while Hermes runs needs no restart.
