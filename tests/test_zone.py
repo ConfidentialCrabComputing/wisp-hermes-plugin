@@ -325,7 +325,7 @@ Desk root /home/u/.wisp/desks;
 
     def test_wisp_parked_by_hermes_the_rule_and_an_ask_wisp_call_say_wisp_is_not_answering(self):
         self.answers(ZONE)
-        parked = {"FAKE_HERMES_WISP_STATUS": "failed"}
+        parked = {"FAKE_HERMES_WISP_STATUS": "failed", "FAKE_HERMES_WISP_RECONNECTING": "1"}
 
         rule = json.loads(self.hermes("sections", **parked))["wisp-routing"]
 
@@ -345,17 +345,57 @@ Desk root /home/u/.wisp/desks;
     def test_wisp_parked_by_hermes_is_reconnected_soon_after_its_endpoint_answers_with_no_restart(self):
         # Hermes's own retry of a parked server comes every 300 s.
         self.answers(ZONE)
-        reconnects = self.home / "reconnect.log"
-        # A running Hermes, the plugin loaded, for up to 15 s or until it asks for a reconnect.
-        running = f"""load_plugin()
-import os, time
-deadline = time.monotonic() + 15
-while time.monotonic() < deadline and not os.path.exists({str(reconnects)!r}):
-    time.sleep(0.2)
-"""
-        self.hermes("python", running, FAKE_HERMES_WISP_STATUS="failed")
+        self.running(FAKE_HERMES_WISP_STATUS="failed", FAKE_HERMES_WISP_RECONNECTING="1")
 
-        self.assertEqual(reconnects.read_text(), "wisp\n")
+        self.assertEqual(self.reconnects(), "wisp\n")
+
+    def running(self, before="", seconds=15, **env):
+        """A running Hermes, the plugin loaded (then `before` run), for `seconds` or until it asks for a reconnect."""
+        self.hermes("python", f"""load_plugin()
+{before}
+import os, time
+deadline = time.monotonic() + {seconds}
+while time.monotonic() < deadline and not os.path.exists({str(self.home / "reconnect.log")!r}):
+    time.sleep(0.2)
+""", **env)
+
+    def reconnects(self):
+        """The servers the plugin asked Hermes to reconnect, one per line."""
+        log = self.home / "reconnect.log"
+        return log.read_text() if log.exists() else ""
+
+    def test_wisp_parked_on_a_permanent_error_is_never_reconnected_and_hermes_is_told_to_connect_again(self):
+        # A revoked Host Agent Credential: the endpoint takes connections, Hermes parked `wisp` for good.
+        self.answers(ZONE)
+        rejected = {"FAKE_HERMES_WISP_STATUS": "failed"}
+
+        self.running(seconds=2, **rejected)
+        rule = json.loads(self.hermes("sections", **rejected))["wisp-routing"]
+
+        self.assertEqual(self.reconnects(), "")
+        for told in (rule, self.asked_wisp(**rejected)):
+            self.assertIn("refused Hermes's credential", told)
+            self.assertIn("`hermes wisp connect https://<host>/mcp`", told)
+            self.assertNotIn("within a minute", told)
+        self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+
+    def test_wisp_that_never_connected_because_its_endpoint_refused_is_reconnected_once_it_listens(self):
+        port = int(self.config["mcp_servers"]["wisp"]["url"].rsplit(":", 1)[1].split("/")[0])
+        # Hermes failed `wisp` at its start, the Runtime down; it starts listening a moment later.
+        listen = f"""import socket, time
+time.sleep(3)
+listening = socket.create_server(("127.0.0.1", {port}))"""
+
+        self.running(listen, FAKE_HERMES_WISP_STATUS="failed")
+
+        self.assertEqual(self.reconnects(), "wisp\n")
+
+    def test_after_connect_remove_a_parked_wisp_is_not_reconnected(self):
+        self.config.pop("mcp_servers")
+
+        self.running(seconds=2, FAKE_HERMES_WISP_STATUS="failed", FAKE_HERMES_WISP_RECONNECTING="1")
+
+        self.assertEqual(self.reconnects(), "")
 
     def test_plugins_loaded_again_in_a_running_hermes_still_reconnect_wisp_from_one_thread(self):
         # Hermes loads every plugin again in its process on a forced rediscovery (an install, a reload).
