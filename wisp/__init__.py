@@ -86,6 +86,8 @@ def register(ctx):
     # time, in the same process, and its load reads and clears the verdict the process's one revive thread writes.
     revival = next((thread for thread in threading.enumerate() if thread.name == "wisp-revive"), None)
     refusal = getattr(revival, "refusal", None) or [None]
+    # Whether this process had the Runtime replace its agent token, kept on the same thread for the same reason.
+    sealed = getattr(revival, "sealed", False)
 
     def hermes_wisp():
         """Hermes's MCP client's view of `wisp`: None while it answers (or with no client loaded: only a Hermes that
@@ -198,14 +200,15 @@ def register(ctx):
                 _warn(warning)
             protected = True
             rule = routing_rule(zone)
-            if live and revival is None and not any(warning.startswith(UNPROTECTED) for warning in warnings):
+            if live and not sealed and not any(warning.startswith(UNPROTECTED) for warning in warnings):
                 # Sandboxed now, beside the Runtime that just answered: the agent token read before this start could
                 # reach the model, so the Runtime replaces it. Every such start asks, so the last replacement is one
-                # asked from inside a sandbox. A load again in a process that already loaded the plugin (its revive
-                # thread runs) is no start: a client holding the token it was just given keeps it. Bubblewrap's
-                # child is a new process, so it asks.
+                # asked from inside a sandbox. A load again in a process whose replacement succeeded asks no more: a
+                # client holding the token it was just given keeps it. One that never had it replaced (its loads ran
+                # on the cache, unsandboxed, or the ask failed) asks. Bubblewrap's child is a new process, so it asks.
                 try:
                     call_tool(pin["url"], credential(), "wisp_sealed")
+                    sealed = True
                 except Exception as exc:  # noqa: BLE001 — the token stays as it was; the start goes on
                     logger.warning("Wisp: could not have the Runtime replace its agent token: %r", exc)
     except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, never a failed load
@@ -249,3 +252,4 @@ def register(ctx):
         revival = threading.Thread(target=revive, name="wisp-revive", daemon=True)
         revival.refusal = refusal
         revival.start()
+    revival.sealed = sealed
