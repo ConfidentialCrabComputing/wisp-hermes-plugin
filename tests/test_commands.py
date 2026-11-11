@@ -18,6 +18,7 @@ from pathlib import Path
 FAKE = Path(__file__).resolve().parent / "fake"
 PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 CREDENTIAL = "wisp_hermes_s3cr3t"
+PING = 1.0  # how long the test endpoint waits on a ping's answer (Wisp's waits a minute)
 
 
 def answered(text, conversation="s1"):
@@ -162,12 +163,14 @@ class Commands(unittest.TestCase):
         (self.home / ".env").write_text(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}\n")
         return calls
 
-    def asking_endpoint(self, answers):
+    def asking_endpoint(self, answers, refuses_answers=False):
         """A fake Wisp MCP endpoint as Wisp's is over Streamable HTTP: each `tools/call` is answered on its own SSE
         stream, in order, from `answers[tool]`: a `CallToolResult`, or for a call that parks on a Confirmation a
-        function of the elicitation's action, asked after a ping, and only of a client that declared elicitation
+        function of the elicitation's action, asked with a ping while it is open (a ping unanswered within `PING`
+        drops the call), and only of a client that declared elicitation
         (else the function gets None, as Wisp's Run then runs under `policy`). Returns the client's answers to the
-        endpoint's own requests, by id, and logs the calls to `calls`."""
+        endpoint's own requests, by id, and logs the calls to `calls`. `refuses_answers`: it refuses each POST of an
+        elicitation's answer."""
         replies, calls, declared = {}, [], {}
         replied = threading.Condition()
         ids = itertools.count(1)
@@ -179,6 +182,9 @@ class Commands(unittest.TestCase):
 
             def do_POST(self):
                 message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if refuses_answers and "action" in (message.get("result") or {}):
+                    self.send_error(400)
+                    return
                 if "method" not in message or "id" not in message:
                     with replied:
                         if "method" not in message:
@@ -209,12 +215,16 @@ class Commands(unittest.TestCase):
                 if callable(answer):
                     action = None
                     if "elicitation" in declared.get(self.headers["Mcp-Session-Id"], {}):
-                        ping, ask = f"p{next(ids)}", f"e{next(ids)}"
-                        self.event({"jsonrpc": "2.0", "id": ping, "method": "ping"})
+                        ask, ping = f"e{next(ids)}", f"p{next(ids)}"
                         self.event({"jsonrpc": "2.0", "id": ask, "method": "elicitation/create", "params": {
                             "message": "Run bash_run: echo tg-ok", "requestedSchema": {"type": "object", "properties": {}}}})
+                        # As Wisp's: its stream is pinged while the elicitation is open, and a ping nobody answers
+                        # is a dropped connection: the call ends without its answer.
+                        self.event({"jsonrpc": "2.0", "id": ping, "method": "ping"})
                         with replied:
-                            replied.wait_for(lambda: ask in replies and ping in replies, timeout=10)
+                            if not replied.wait_for(lambda: ping in replies, timeout=PING):
+                                return
+                            replied.wait_for(lambda: ask in replies, timeout=10)
                         action = ((replies.get(ask) or {}).get("result") or {}).get("action")
                     answer = answer(action)
                 self.event({"jsonrpc": "2.0", "id": message["id"], "result": answer})
@@ -250,6 +260,14 @@ class Commands(unittest.TestCase):
         self.assertEqual([question for question, _choices in self.asked()], ["Run bash_run: echo tg-ok"])
         self.assertIn("tg-ok", shown)
         self.assertEqual([r["result"] for r in replies.values() if "action" not in r["result"]], [{}])  # the ping's
+
+    def test_wisp_on_a_gateway_answers_wisps_pings_while_its_confirmation_waits_on_the_user(self):
+        self.asking_endpoint({"ask_wisp": [lambda action: text("tg-ok" if action == "accept" else f"Denied ({action})")]})
+
+        shown = self.hermes("message", "wisp", "Run in your bash exactly: echo tg-ok", choice="Allow for this task",
+                            FAKE_HERMES_CHOICE_AFTER=str(2 * PING))
+
+        self.assertIn("tg-ok", shown)
 
     def test_wisp_on_a_gateway_refuses_on_deny_and_never_reports_an_unanswered_confirmation_as_a_decline(self):
         for choice, action in (("Deny", "decline"), (None, "cancel")):
@@ -323,23 +341,14 @@ print(ctx.commands["wisp"]("pay the bill"))""")
 
     def test_wisp_on_a_gateway_that_cannot_send_a_confirmations_answer_says_the_task_may_still_be_running(self):
         # The Run exists and waits on the Confirmation.
-        self.asking_endpoint({"ask_wisp": [lambda action: text("paid")]})
+        self.asking_endpoint({"ask_wisp": [lambda action: text("paid")]}, refuses_answers=True)
 
-        shown = self.hermes("python", """
-import json, sys, urllib.error
-sys.modules["__main__"].SURFACE = "telegram"
-ctx = load_plugin()
-client = sys.modules["hermes_plugins_wisp.mcp_client"]
-opened = client._open
-def unreached_answers(request, **kwargs):
-    if request.data and "method" not in json.loads(request.data):
-        raise urllib.error.URLError(ConnectionRefusedError())
-    return opened(request, **kwargs)
-client._open = unreached_answers
-print(ctx.commands["wisp"]("pay the bill"))""", choice="Allow for this task")
+        started = time.monotonic()
+        shown = self.message("wisp", "pay the bill", choice="Allow for this task")
 
         self.assertNotIn("Wisp is not answering", shown)
         self.assertIn("may still be running", shown)
+        self.assertLess(time.monotonic() - started, 5)  # told when the answer fails, not when the stream next speaks
 
     def raising(self, command, args, error):
         """`command` on a gateway whose `call_tool` raises `error` (Python source)."""
@@ -427,6 +436,21 @@ print(ctx.commands["wisp"]("pay the bill"))""", choice="Allow for this task")
         self.assertEqual([question for question, _choices in self.asked()], ["Run bash_run: echo tg-ok"])
         self.assertNotIn("Wisp is not answering", shown)
         self.assertIn("Wisp's ask_wisp failed", shown)
+        self.assertIn("timed out", shown)
+        self.assertIn("may still be running", shown)
+
+    def test_wisp_on_a_gateway_whose_confirmation_nobody_answers_by_its_deadline_says_it_timed_out(self):
+        self.asking_endpoint({"ask_wisp": [lambda action: text("paid")]})
+
+        started = time.monotonic()
+        shown = self.hermes("python", """
+import sys
+sys.modules["__main__"].SURFACE = "telegram"
+ctx = load_plugin()
+sys.modules["hermes_plugins_wisp.commands"].WAIT = 2.0
+print(ctx.commands["wisp"]("pay the bill"))""", choice="Allow for this task", FAKE_HERMES_CHOICE_AFTER="30")
+
+        self.assertLess(time.monotonic() - started, 10)
         self.assertIn("timed out", shown)
         self.assertIn("may still be running", shown)
 

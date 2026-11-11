@@ -7,7 +7,9 @@ asks it itself. Standard library only."""
 import http.client
 import ipaddress
 import json
+import queue
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -146,9 +148,10 @@ def _object(value, what):
 
 
 def _chunks(response, left):
-    """The body as it arrives, `left()` checked before each read. ponytail: a stalled read is bounded only by the socket
-    timeout `left()` gave at the open (up to twice `timeout` in all), and headers dripped byte by byte not at all; a
-    thread per call would bound both, if an endpoint ever does that."""
+    """The body as it arrives, `left()` checked before each read. ponytail: a stalled read of a JSON body is bounded
+    only by the socket timeout `left()` gave at the open (up to twice `timeout` in all), and headers dripped byte by
+    byte not at all; reading them on a thread, as `_answer` reads a stream, would bound both, if an endpoint ever
+    does that."""
     while True:
         left()
         if not (chunk := response.read1(65536)):
@@ -169,15 +172,52 @@ def _answer(response, request_id, left, reply):
     notifications, and handing its own requests to `reply`)."""
     if response.headers.get_content_type() == "application/json":
         return json.loads(b"".join(_chunks(response, left)))
-    for line in _lines(response, left):
-        if not line.startswith(b"data:"):
-            continue
-        message = json.loads(line[5:])
-        if not isinstance(message, dict):
-            continue
-        if "method" in message:
-            if "id" in message and isinstance(message["method"], str):
-                reply(message)
-        elif message.get("id") == request_id:
-            return message
-    raise McpError("the endpoint closed the stream without an answer")
+    # The stream is read on a thread of its own and an elicitation asked on another: the server's pings are answered
+    # while the user takes their time, as the server takes an unanswered one for a dropped connection. Either thread's
+    # failure comes back here, where it ends the call.
+    events = queue.Queue()
+
+    def background(work):
+        def run():
+            try:
+                work()
+            except BaseException as exc:
+                events.put(exc)
+        threading.Thread(target=run, daemon=True).start()
+
+    def read():
+        for line in _lines(response, left):
+            events.put(line)
+        events.put(McpError("the endpoint closed the stream without an answer"))
+
+    # A duplicate of the connection's socket, taken before the reader can end it (its family plays no part).
+    stream = socket.fromfd(response.fileno(), socket.AF_INET, socket.SOCK_STREAM)
+    background(read)
+    try:
+        while True:
+            try:
+                line = events.get(timeout=left())
+            except queue.Empty:
+                continue  # left() raises the call's TimeoutError
+            if isinstance(line, BaseException):
+                raise line
+            if not line.startswith(b"data:"):
+                continue
+            message = json.loads(line[5:])
+            if not isinstance(message, dict):
+                continue
+            if "method" in message:
+                if "id" in message and isinstance(message["method"], str):
+                    if message["method"] == "elicitation/create":
+                        background(lambda message=message: reply(message))
+                    else:
+                        reply(message)
+            elif message.get("id") == request_id:
+                return message
+    finally:
+        # Ends the reader's read: the response's close would otherwise wait on it until the stream next speaks.
+        with stream:
+            try:
+                stream.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # the server closed it already
