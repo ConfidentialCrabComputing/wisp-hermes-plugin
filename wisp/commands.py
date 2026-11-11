@@ -2,8 +2,10 @@
 
 import json
 import re
+import urllib.error
 
 from .mcp_client import McpError, call_tool
+from .zone import not_answering
 
 NOT_CONNECTED = "Wisp is not connected: run `hermes wisp connect <url>`."
 # Wisp holds a call up to 1800 s before it hands back the Run to follow with `wisp_result`.
@@ -14,11 +16,16 @@ CHOICES = [{"value": "accept", "label": "Allow for this task"}, {"value": "decli
 _TAGS = re.compile("[\U000E0000-\U000E007F]")
 
 
-def wisp(ctx, raw_args):
-    """The task to `ask_wisp`, without Hermes's model; while the Run goes on, `wisp_result` until it ends."""
+def wisp(ctx, raw_args, unavailable=lambda: None):
+    """The task to `ask_wisp`, without Hermes's model; while the Run goes on, `wisp_result` until it ends.
+    `unavailable()` says, as for the hook, why there is no Wisp to ask (None while there is): answered instead of
+    calling, since Hermes would answer a parked server's tool with "Unknown tool"."""
     task = (raw_args or "").strip()
     if not task:
         return "Usage: /wisp <task>"
+    why = unavailable()
+    if why:
+        return why
     # ponytail: a Hermes without `ask_choice` keeps its own client everywhere, as before it could ask.
     if not hasattr(ctx, "ask_choice") or not hasattr(ctx, "session_surface") or ctx.session_surface() == "cli":
         # Hermes's client, whose panel asks the CLI's Confirmations. Its names for the tools: `mcp__<server>__<tool>`.
@@ -34,7 +41,11 @@ def wisp(ctx, raw_args):
         def call(tool, args):
             try:
                 result = call_tool(*endpoint, tool, args, timeout=WAIT, elicit=lambda message: _ask(ctx, message))
-            except (OSError, McpError, ValueError) as exc:
+            except urllib.error.HTTPError as exc:  # Wisp answered: its word, not that it is down
+                return {"error": f"Wisp's {tool} failed: {exc}"}
+            except OSError:  # refused, reset, timed out: on the way to Wisp, so it is not answering
+                return {"error": not_answering()}
+            except (McpError, ValueError) as exc:
                 return {"error": f"Wisp's {tool} failed: {exc}"}
             structured = result.get("structuredContent")
             return {"result": "\n".join(c.get("text", "") for c in result.get("content", [])),

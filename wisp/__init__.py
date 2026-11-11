@@ -46,7 +46,8 @@ def register(ctx):
     ctx.register_cli_command(
         "wisp", "Connect Hermes to a Wisp Runtime", connect.setup, connect.handle,
         description="hermes wisp connect <url> registers the Runtime's MCP endpoint; --remove undoes it.")
-    ctx.register_command("wisp", lambda raw_args: commands.wisp(ctx, raw_args),
+    # `unavailable` is bound below, before any command can run: what the hook refuses with, `/wisp` answers.
+    ctx.register_command("wisp", lambda raw_args: commands.wisp(ctx, raw_args, unavailable),
                          description="Hand a task to Wisp directly", args_hint="[task]")
     # `[task]`, not `<task>`: Hermes leaves a plugin command whose hint starts with `<` out of Telegram's menu. Bare,
     # `/wisp` answers how to use it.
