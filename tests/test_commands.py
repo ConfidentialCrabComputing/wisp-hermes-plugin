@@ -282,6 +282,26 @@ class Commands(unittest.TestCase):
         self.assertIn("Wisp is not answering", shown)
         self.assertNotIn("urlopen error", shown)
 
+    def test_wisp_on_a_gateway_whose_connect_or_send_fails_for_any_reason_says_wisp_is_not_answering(self):
+        # urllib wraps in a URLError only what fails before the request was sent: it never reached Wisp.
+        for reason in ("TimeoutError()", "OSError(errno.EHOSTDOWN, 'Host is down')"):
+            with self.subTest(reason=reason):
+                self.config["mcp_servers"] = {"wisp": {"url": "http://127.0.0.1:9/mcp"}}
+                (self.home / ".env").write_text(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}\n")
+
+                shown = self.hermes("python", f"""
+import errno, sys, urllib.error
+sys.modules["__main__"].SURFACE = "telegram"
+ctx = load_plugin()
+def unreached(*args, **kwargs):
+    raise urllib.error.URLError({reason})
+sys.modules["hermes_plugins_wisp.commands"].call_tool = unreached
+print(ctx.commands["wisp"]("pay the bill"))""")
+
+                self.assertIn("Wisp is not answering", shown)
+                self.assertNotIn("may still be running", shown)
+                self.assertNotIn("urlopen error", shown)
+
     def test_wisp_on_a_gateway_that_outlasts_its_wait_after_wisp_took_it_says_it_timed_out_never_not_answering(self):
         # The Run exists: "not answering, try again" would have the user start it twice.
         self.asking_endpoint({"ask_wisp": [lambda action: time.sleep(2) or text("paid")]})
@@ -297,6 +317,7 @@ print(ctx.commands["wisp"]("pay the bill"))""", choice="Allow for this task")
         self.assertNotIn("Wisp is not answering", shown)
         self.assertIn("Wisp's ask_wisp failed", shown)
         self.assertIn("timed out", shown)
+        self.assertIn("may still be running", shown)
 
     def test_wisp_on_a_gateway_without_a_connected_endpoint_says_so(self):
         self.assertIn("hermes wisp connect", self.message("wisp", "summarise my mail"))
