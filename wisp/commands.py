@@ -1,5 +1,6 @@
 """`/wisp <task>` and `/wisp-model [args]` (`/wisp_model` in Telegram), the plugin's slash commands in every Hermes surface."""
 
+import contextvars
 import json
 import re
 import ssl
@@ -39,10 +40,15 @@ def wisp(ctx, raw_args, unavailable=lambda: None):
         endpoint = _endpoint()
         if endpoint is None:
             return NOT_CONNECTED
+        # Hermes binds who `ask_choice` asks to the context it calls this handler in, and the client asks on a thread
+        # of its own, whose context is empty. A copy per question: an earlier call's may still wait on the user, and
+        # a context cannot be entered twice.
+        handler = contextvars.copy_context()
 
         def call(tool, args):
             try:
-                result = call_tool(*endpoint, tool, args, timeout=WAIT, elicit=lambda message: _ask(ctx, message))
+                result = call_tool(*endpoint, tool, args, timeout=WAIT,
+                                   elicit=lambda message: handler.copy().run(_ask, ctx, message))
             except urllib.error.HTTPError as exc:
                 # Only `ask_wisp`'s 4xx is Wisp's refusal, before any Run; a 5xx may come from a hop between after
                 # Wisp took the request, and a `wisp_result` follows a Run that exists.
