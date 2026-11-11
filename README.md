@@ -4,6 +4,11 @@ Hands the tasks that need Wisp's services or Private Folders from [Hermes](https
 to Wisp's `ask_wisp`, and registers `hermes wisp connect <url>`, `/wisp` and `/wisp_model`. It needs Hermes
 v0.21.6 or later.
 
+Hermes's own commands fill a Telegram bot's 60-slot command menu, so `hermes wisp connect` (which `wisp integrate
+hermes` runs) puts `/wisp` and `/wisp_model` first, ahead of any names already in the profile's
+`platforms.telegram.extra.command_menu.priority`; the gateway shows them from its next start. `--remove` takes them out
+again. Typed, both work whether the menu lists them or not, and `/commands` lists every command.
+
 ## Two machines: Wisp on one, Hermes on another
 
 On the Runtime's machine, make the credential (printed once) and put https in front of the Runtime, which binds

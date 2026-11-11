@@ -17,7 +17,8 @@ returns, or "Unknown command /<name>" (`ctx.session_surface()` is `cli` for one,
 and `ctx.ask_choice` logs to `$HERMES_HOME/choices.log` and picks the label `FAKE_HERMES_CHOICE`); its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
 answered, in order, from `$HERMES_HOME/tools.json` ({tool: [handler result, ...]}), as Hermes's registry
 would answer them (a JSON string). `FAKE_HERMES_WISP_STATUS` makes it a Hermes that connects its MCP servers,
-with Hermes's MCP client (`tests/fake/tools`) loaded before the plugin and `wisp` in that status."""
+with Hermes's MCP client (`tests/fake/tools`) loaded before the plugin and `wisp` in that status.
+`hermes telegram-menu` (not Hermes's) prints the plugin commands Telegram's menu lists ahead of Hermes's own."""
 
 import argparse
 import importlib.util
@@ -102,6 +103,7 @@ class Ctx:
     def __init__(self):
         self.cli_commands = {}
         self.commands = {}
+        self.hints = {}
         self.sections = {}
         self.hooks = {}
 
@@ -113,7 +115,9 @@ class Ctx:
 
     def register_command(self, name, handler, description="", args_hint="", argument_mode=None):
         # As Hermes's `register_command` keeps it.
-        self.commands[name.lower().strip().lstrip("/").replace(" ", "-")] = handler
+        key = name.lower().strip().lstrip("/").replace(" ", "-")
+        self.commands[key] = handler
+        self.hints[key] = args_hint
 
     def dispatch_tool(self, tool_name, args, **kwargs):
         with open(HOME / "tools.log", "a") as log:
@@ -312,6 +316,18 @@ def main(argv):
             if isinstance(text, str) and text.strip():
                 rendered[id] = text.strip()
         print(json.dumps(rendered))
+    elif argv == ["telegram-menu"]:
+        # Not Hermes's: the plugin commands Hermes 0.23.1's Telegram menu puts ahead of its own (and of its 60-slot cap),
+        # as `commands_platforms.telegram_menu_commands` does: those `platforms.telegram.extra.command_menu.priority`
+        # names (lowercased, `-` made `_`), in its order; a command whose hint starts with `<` is never in the menu.
+        ctx = load_plugin()
+        menu = {name.replace("-", "_"): hint for name, hint in ctx.hints.items()}
+        node = config()
+        for key in ("platforms", "telegram", "extra", "command_menu", "priority"):
+            node = node.get(key) if isinstance(node, dict) else None
+        names = [node] if isinstance(node, str) else node if isinstance(node, list) else []
+        print(json.dumps([name for name in (str(n).lower().replace("-", "_") for n in names)
+                          if name in menu and not menu[name].strip().startswith("<")]))
     elif argv == ["pre-tool-call"]:
         # Not Hermes's: each `[tool_name, args]` of the JSON list on stdin, through the plugin's
         # `pre_tool_call` hooks; prints the block message of each, null when it proceeds.

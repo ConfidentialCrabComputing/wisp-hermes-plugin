@@ -25,6 +25,9 @@ OLD_CREDENTIAL_ENV = "WISP_CREDENTIAL"
 CALL_TIMEOUT = 1900
 TIMEOUT_KEYS = ("timeouts.tools.sequential_call", "timeouts.tools.concurrent_batch")
 SERVER_KEY = "mcp_servers.wisp"
+# Hermes's own commands fill Telegram's 60-slot menu first; the names this lists come before them, the user's after.
+MENU_KEY = "platforms.telegram.extra.command_menu.priority"
+MENU = ["wisp", "wisp_model"]
 # `hermes wisp` exists only once Hermes loads the plugin, and Hermes loads only an enabled one.
 ENABLE_HINT = ("The plugin is enabled by `hermes plugins install <repo> --enable` (or `hermes plugins enable wisp`); "
                "connect leaves plugins.enabled alone.")
@@ -143,6 +146,7 @@ def connect(url):
         current = _get(config, key)
         if not isinstance(current, (int, float)) or current < CALL_TIMEOUT:
             changes.append((key, CALL_TIMEOUT))
+    changes.append((MENU_KEY, MENU + _users_menu(config)))
 
     # What the timeouts held before the first connect, for --remove; a later connect keeps it.
     prior = _prior_path()
@@ -154,6 +158,13 @@ def connect(url):
     print(f"Set {CREDENTIAL_ENV} in {get_env_path()}")
     print(ENABLE_HINT)
     print(LIMITS)
+
+
+def _users_menu(config):
+    """The menu priority's names other than the plugin's (Hermes takes a single name for a list of one)."""
+    current = _get(config, MENU_KEY)
+    names = [current] if isinstance(current, str) else current if isinstance(current, list) else []
+    return [name for name in names if str(name).lower().replace("-", "_") not in MENU]
 
 
 def _prior_path():
@@ -177,6 +188,12 @@ def remove():
     # Hermes's model, which could plant a server there for --remove to install.
     if _get(config, SERVER_KEY) is not None:
         _hermes("config", "unset", SERVER_KEY)
+    if _get(config, MENU_KEY) is not None:
+        users = _users_menu(config)
+        if not users:
+            _hermes("config", "unset", MENU_KEY)
+        elif users != _get(config, MENU_KEY):
+            _hermes("config", "set", MENU_KEY, json.dumps(users))
     # Only the timeouts connect touches, and only numbers.
     for key in TIMEOUT_KEYS:
         if key not in prior:

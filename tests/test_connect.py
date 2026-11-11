@@ -156,6 +156,7 @@ class Connect(unittest.TestCase):
             ["config", "set", "mcp_servers.wisp", json.dumps(server)],
             ["config", "set", "timeouts.tools.sequential_call", "1900"],
             ["config", "set", "timeouts.tools.concurrent_batch", "1900"],
+            ["config", "set", "platforms.telegram.extra.command_menu.priority", '["wisp", "wisp_model"]'],
         ])
         self.assertIn(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}", (self.home / ".env").read_text())
         log = (self.home / "argv.log").read_text()
@@ -204,6 +205,23 @@ class Connect(unittest.TestCase):
         self.assertEqual(self.config(), start)
         self.assertEqual((self.home / ".env").read_text(), "OPENROUTER_API_KEY=sk-or-1\n")
         self.assertFalse((self.home / "plugins" / "wisp" / "zone.json").exists())
+
+    def test_connect_puts_both_commands_first_in_telegrams_menu(self):
+        # Hermes's own commands fill the menu's 60 slots; a command it lists by priority comes before them.
+        self.connect()
+
+        self.assertEqual(json.loads(self.hermes("telegram-menu").stdout), ["wisp", "wisp_model"])
+
+    def test_connect_keeps_the_users_menu_priority_after_its_own_and_remove_leaves_only_the_users(self):
+        start = {**ENABLED, "platforms": {"telegram": {"extra": {"command_menu": {"priority": ["help", "wisp"]}}}}}
+        self.write_config(start)
+
+        self.connect()
+        menu = self.config()["platforms"]["telegram"]["extra"]["command_menu"]["priority"]
+        self.assertEqual(menu, ["wisp", "wisp_model", "help"])
+        self.assertEqual(self.hermes("wisp", "connect", "--remove").returncode, 0)
+
+        self.assertEqual(self.config()["platforms"]["telegram"]["extra"]["command_menu"]["priority"], ["help"])
 
     def test_connect_keeps_a_longer_timeout_of_the_users(self):
         self.write_config({**ENABLED, "timeouts": {"tools": {"concurrent_batch": 3600}}})

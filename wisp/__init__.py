@@ -44,7 +44,9 @@ def register(ctx):
         "wisp", "Connect Hermes to a Wisp Runtime", connect.setup, connect.handle,
         description="hermes wisp connect <url> registers the Runtime's MCP endpoint; --remove undoes it.")
     ctx.register_command("wisp", lambda raw_args: commands.wisp(ctx, raw_args),
-                         description="Hand a task to Wisp directly", args_hint="<task>")
+                         description="Hand a task to Wisp directly", args_hint="[task]")
+    # `[task]`, not `<task>`: Hermes leaves a plugin command whose hint starts with `<` out of Telegram's menu. Bare,
+    # `/wisp` answers how to use it.
     # A hyphen, not an underscore: a gateway looks a typed name up with `_` made `-`, so Telegram's menu (which
     # shows it as `/wisp_model`) and the CLI (`/wisp-model`) both find it; `wisp_model` no gateway could reach.
     ctx.register_command("wisp-model", commands.wisp_model,
