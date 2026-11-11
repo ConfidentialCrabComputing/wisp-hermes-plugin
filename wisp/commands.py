@@ -1,8 +1,11 @@
 """`/wisp <task>` and `/wisp-model [args]` (`/wisp_model` in Telegram), the plugin's slash commands in every Hermes surface."""
 
+import http.client
 import json
 import re
+import ssl
 import urllib.error
+import urllib.parse
 
 from .mcp_client import McpError, call_tool
 from .zone import not_answering
@@ -44,6 +47,10 @@ def wisp(ctx, raw_args, unavailable=lambda: None):
             except urllib.error.HTTPError as exc:  # Wisp answered: its word, not that it is down
                 return {"error": f"Wisp's {tool} failed: {exc}"}
             except urllib.error.URLError as exc:
+                if isinstance(exc.reason, ssl.SSLCertVerificationError):  # reached something, but not provably Wisp
+                    host = urllib.parse.urlsplit(endpoint[0]).hostname
+                    return {"error": f"Wisp's endpoint {host} failed its certificate check ({exc.reason}): "
+                                     "the connection was not made"}
                 # urllib wraps in a URLError only what fails in the connect or the send: the request never reached Wisp.
                 # Only before `ask_wisp` reached it can no Run exist; a `wisp_result` follows one that does.
                 if tool == "ask_wisp":
@@ -56,7 +63,7 @@ def wisp(ctx, raw_args, unavailable=lambda: None):
                 return {"error": f"Wisp's {tool} failed: it timed out ({exc}); the task may still be running in Wisp"}
             except OSError as exc:
                 return {"error": f"Wisp's {tool} failed: {exc}; the task may still be running in Wisp"}
-            except (McpError, ValueError) as exc:
+            except (McpError, ValueError, http.client.HTTPException) as exc:
                 return {"error": f"Wisp's {tool} failed: {exc}"}
             structured = result.get("structuredContent")
             return {"result": "\n".join(c.get("text", "") for c in result.get("content", [])),
@@ -92,6 +99,6 @@ def wisp_model(raw_args):
     args = (raw_args or "").strip()
     try:
         result = call_tool(*endpoint, "wisp_model", {"args": args} if args else {}, timeout=30.0)
-    except (OSError, McpError, ValueError) as exc:
+    except (OSError, McpError, ValueError, http.client.HTTPException) as exc:
         return f"Wisp's wisp_model failed: {exc}"
     return "\n".join(c.get("text", "") for c in result.get("content", []))

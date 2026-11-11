@@ -341,6 +341,41 @@ print(ctx.commands["wisp"]("pay the bill"))""", choice="Allow for this task")
         self.assertNotIn("Wisp is not answering", shown)
         self.assertIn("may still be running", shown)
 
+    def raising(self, command, args, error):
+        """`command` on a gateway whose `call_tool` raises `error` (Python source)."""
+        self.config["mcp_servers"] = {"wisp": {"url": "https://wisp.example:8443/mcp"}}
+        (self.home / ".env").write_text(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}\n")
+        return self.hermes("python", f"""
+import http.client, ssl, sys, urllib.error
+sys.modules["__main__"].SURFACE = "telegram"
+ctx = load_plugin()
+def failing(*args, **kwargs):
+    raise {error}
+sys.modules["hermes_plugins_wisp.commands"].call_tool = failing
+print(ctx.commands[{command!r}]({args!r}))""")
+
+    def test_wisp_on_a_gateway_whose_endpoint_fails_its_certificate_check_says_so_never_not_answering(self):
+        shown = self.raising("wisp", "pay the bill", "urllib.error.URLError(ssl.SSLCertVerificationError("
+                                                     "1, 'certificate verify failed: self-signed certificate'))")
+
+        self.assertNotIn("Wisp is not answering", shown)
+        self.assertIn("wisp.example", shown)
+        self.assertIn("certificate", shown)
+        self.assertIn("self-signed certificate", shown)
+        self.assertIn("not made", shown)
+
+    def test_wisp_on_a_gateway_whose_answer_breaks_off_says_it_failed(self):
+        shown = self.raising("wisp", "pay the bill", "http.client.IncompleteRead(b'')")
+
+        self.assertIn("Wisp's ask_wisp failed", shown)
+        self.assertNotIn("Traceback", shown)
+
+    def test_wisp_model_on_an_answer_that_is_not_http_says_it_failed(self):
+        shown = self.raising("wisp-model", "", "http.client.BadStatusLine('x')")
+
+        self.assertIn("Wisp's wisp_model failed", shown)
+        self.assertNotIn("Traceback", shown)
+
     def test_wisp_on_a_gateway_that_outlasts_its_wait_after_wisp_took_it_says_it_timed_out_never_not_answering(self):
         # The Run exists: "not answering, try again" would have the user start it twice.
         self.asking_endpoint({"ask_wisp": [lambda action: time.sleep(2) or text("paid")]})
