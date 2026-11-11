@@ -4,6 +4,7 @@ It runs before Hermes connects its MCP servers (at the plugin's load), from `/wi
 gateway, where Hermes's client has no one to ask a Confirmation of (a command runs outside an agent turn), so this one
 asks it itself. Standard library only."""
 
+import http.client
 import ipaddress
 import json
 import socket
@@ -62,8 +63,8 @@ def refuses(url, timeout=1.0):
 
 def call_tool(url, credential, name, arguments=None, timeout=5.0, elicit=None):
     """The `CallToolResult` of tool `name`; raises `McpError` for a refusal or a tool error and `OSError`
-    when the endpoint cannot be reached, or `TimeoutError` when the whole call outlasts `timeout`. With `elicit`,
-    the client declares elicitation and answers each of the server's form elicitations with
+    when the endpoint cannot be reached or its answer breaks off, or `TimeoutError` when the whole call outlasts
+    `timeout`. With `elicit`, the client declares elicitation and answers each of the server's form elicitations with
     `elicit(message)`: "accept", "decline" or "cancel"."""
     session = {}
     deadline = time.monotonic() + timeout
@@ -83,12 +84,16 @@ def call_tool(url, credential, name, arguments=None, timeout=5.0, elicit=None):
             headers["Content-Type"] = "application/json"
             data = json.dumps(message).encode()
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        with _open(request, timeout=left()) as response:
-            if "id" not in session and response.headers.get("Mcp-Session-Id"):
-                session["id"] = response.headers["Mcp-Session-Id"]
-            if message is None or "id" not in message or "method" not in message:
-                return None  # a notification or our answer to a request of the server's
-            return _answer(response, message["id"], left, reply)
+        try:
+            with _open(request, timeout=left()) as response:
+                if "id" not in session and response.headers.get("Mcp-Session-Id"):
+                    session["id"] = response.headers["Mcp-Session-Id"]
+                if message is None or "id" not in message or "method" not in message:
+                    return None  # a notification or our answer to a request of the server's
+                return _answer(response, message["id"], left, reply)
+        except http.client.HTTPException as exc:
+            # An answer broken off or not HTTP, after the request was sent: a network failure, as every caller takes it.
+            raise OSError(f"the endpoint's answer broke off or was not HTTP ({exc!r})") from exc
 
     def reply(request):
         """Our answer to the server's own `request`, sent while its stream waits on it."""
