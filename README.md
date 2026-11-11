@@ -1,31 +1,147 @@
 # Wisp's Hermes plugin
 
 Hands the tasks that need Wisp's services or Private Folders from [Hermes](https://github.com/NousResearch/hermes-agent)
-to Wisp's `ask_wisp`, and registers `hermes wisp connect <url>`, `/wisp` and `/wisp_model`. It needs Hermes
-v0.21.6 or later.
+to Wisp's `ask_wisp`, and registers `hermes wisp connect <url>`, `/wisp` and `/wisp-model` (`/wisp_model` in
+Telegram). It needs Hermes v0.21.6 or later.
 
 Hermes's own commands fill a Telegram bot's 60-slot command menu, so `hermes wisp connect` (which `wisp integrate
 hermes` runs) puts `/wisp` and `/wisp_model` first, ahead of any names already in the profile's
 `platforms.telegram.extra.command_menu.priority`; the gateway shows them from its next start. `--remove` takes them out
 again. Typed, both work whether the menu lists them or not, and `/commands` lists every command.
 
+## One machine
+
+Don't install the plugin from here: `wisp integrate hermes` lays out the copy embedded in the `wisp` binary (this
+repository's committed code) in every Hermes profile, connects it over loopback, and sandboxes Hermes away from Wisp's
+zone: its data directory, the Desk root, the Private Folders and the files outside them Wisp reads its secrets from
+(`wisp serve --config`, `WISP_MASTER_KEY_FILE`). On Linux such a file reads as empty inside the sandbox, and a write to it
+goes nowhere.
+
+1. Install Wisp, answering its two questions: whether to start the Runtime in the background now and at every login, and
+   whether to log in now.
+
+   ```sh
+   curl -fsSL https://usewisp.io/runtime/install.sh | sh
+   ```
+
+2. Open a new terminal, or load the `PATH` into this one with the `source` line the installer prints (e.g.
+   `source ~/.zshrc`). Until then `wisp` is not found, or is another install's.
+
+3. Wire Wisp into every Hermes profile. It asks whether to move Hermes's MCP servers into Wisp.
+
+   ```sh
+   wisp integrate hermes
+   ```
+
+4. On Linux, bubblewrap is required for Wisp inside Hermes, not only for `bash_run`'s sandbox. When it is missing, or
+   Ubuntu's AppArmor blocks it, `integrate` prints the fix as "Before the restart: …": `sudo apt install bubblewrap`, or a
+   `sudo sh -c '…'` line that installs a bwrap AppArmor profile. Run it as printed; with no `sudo`, run it as root
+   without its leading `sudo`.
+
+5. Restart Hermes, and quit any open `hermes` CLI:
+
+   ```sh
+   hermes gateway restart --all
+   ```
+
+   Until each Hermes has stopped, it runs without the sandbox.
+
+Then:
+
+- A Confirmation Wisp raises shows in Hermes's own approval panel, and is denied when nobody answers within Hermes's
+  5 minutes (`approvals.timeout`). One "Allow once" covers that tool for the rest of the task, except where Wisp's own
+  rules ask every time (a Judge escalation, an "Always ask" Rule).
+- A Hermes cron job or `hermes chat -q` has no one to answer, so it can use only the Wisp tools already allowed. Allow
+  them beforehand: `wisp permissions set <tool> allow`.
+- With Wisp's Auto Mode on, the Judge answers Hermes's Wisp calls first: Hermes's panel shows only what it escalates, and
+  a tool set to `always_ask` always reaches it.
+- The model Wisp uses for Hermes is chosen with `/wisp-model` in the Hermes CLI, `/wisp_model` in Telegram.
+
+### Asked from a chat
+
+When the user asks Hermes in a chat (Telegram, Slack) to install Wisp or this plugin, Hermes runs these steps itself,
+in its terminal. There is no terminal for the installer to ask its questions on, so they are answered up front.
+
+Hermes does not read `~/.wisp` or `~/.config/wisp` itself, not even while a step fails: they hold Wisp's secrets. It asks
+`~/.wisp/bin/wisp status` for the Runtime's state, and reads its log with `journalctl --user -u wisp` on Linux or from
+`~/.wisp/logs/serve.log` on macOS.
+
+1. Install Wisp and start it as a background service:
+
+   ```sh
+   curl -fsSL https://usewisp.io/runtime/install.sh | WISP_SERVICE=1 sh
+   ```
+
+2. Sign in. Start the login in the background with a pty (Hermes: `terminal(background=true, pty=true)`): it prints a
+   URL and waits for a line.
+
+   ```sh
+   ~/.wisp/bin/wisp login --manual
+   ```
+
+   Send the user the URL exactly as printed, in a code block, and ask them to sign in and send back the URL their browser
+   lands on. Write that URL to the process followed by a newline. The login expires after 5 minutes; then start it again.
+
+3. Wire Wisp into Hermes, without the question about moving MCP servers:
+
+   ```sh
+   ~/.wisp/bin/wisp integrate hermes --skip-connectors
+   ```
+
+   Run from Hermes's own terminal, Hermes reloads under this command as it enables the plugin, and the turn ends there.
+   `integrate` goes on, and what it says from then on is in `wisp-integrate.log` in Hermes's home (`~/.hermes`). On
+   Linux, if the log names a fix "Before the restart", Hermes runs without the sandbox until it is applied: Hermes
+   gives it to the user to run as root (without its leading `sudo`), and the user then sends `/restart`.
+
+That reload is the last step: no restart command follows. The user checks the result with a Wisp task, or Hermes with
+`hermes mcp test wisp`; Hermes can read the log to say how `integrate` ended. Hermes asks the user to send `/restart` in
+the chat only if the chat stays locked, or on macOS. `hermes gateway restart` is for a terminal: Hermes refuses it from
+inside a supervised gateway.
+
+`~/.wisp/bin` reaches `PATH` only in new shells, hence the full path. Hermes's MCP servers can be moved into Wisp later,
+from a terminal, with `wisp integrate hermes --connectors`.
+
 ## Two machines: Wisp on one, Hermes on another
 
-On the Runtime's machine, make the credential (printed once) and put https in front of the Runtime, which binds
-`127.0.0.1` as always (Tailscale Serve, Caddy), or keep an `ssh -L` as a service on Hermes's machine:
+The Runtime binds `127.0.0.1` as always, and the secret Hermes holds is the Host Agent Credential, which opens the
+Runtime's `/mcp` and nothing else.
 
-```sh
-wisp tokens create --name hermes --host-agent
-```
+1. On the Runtime's machine, put https in front of it. With Tailscale Serve, enable Serve and HTTPS for the tailnet once
+   (in its admin console), then run the command below, which prints the machine's https name. Caddy as a reverse proxy
+   works as well, or an `ssh -L` tunnel kept up as a service on Hermes's machine (then the URL in step 4 is
+   `http://127.0.0.1:<port>/mcp`).
 
-On Hermes's machine, install the plugin and connect it. `connect` reads the credential from stdin, without echo:
+   ```sh
+   tailscale serve --bg 3008
+   ```
 
-```sh
-hermes plugins install ConfidentialCrabComputing/wisp-hermes-plugin/wisp --enable
-hermes wisp connect https://wisp.example.ts.net/mcp
-```
+2. There, make the Host Agent Credential (printed once) for that name, which also adds the name to the Runtime's
+   `allowedHosts`. The Runtime answers to it once restarted: `systemctl --user restart wisp` on Linux,
+   `launchctl kickstart -k gui/$(id -u)/io.usewisp.runtime` on macOS, or stop and start `wisp serve`.
 
-The plugin is the repository's `wisp/` folder: Hermes clones and scans only that folder and installs it as `wisp`.
+   ```sh
+   wisp tokens create --name hermes --host-agent --public-url https://<that name>
+   ```
+
+3. On Hermes's machine, install the plugin:
+
+   ```sh
+   hermes plugins install ConfidentialCrabComputing/wisp-hermes-plugin/wisp --enable
+   ```
+
+   The plugin is the repository's `wisp/` folder: Hermes clones and scans only that folder and installs it as `wisp`.
+   Its scanner shows a CAUTION verdict and its findings, then "Decision: BLOCKED" with "Use --force to override", then
+   asks "Install anyway? [y/N]": answer `y`. With no terminal it refuses; add `--force` there.
+
+4. Connect it. `connect` asks for the Host Agent Credential and reads it without echo; then check the endpoint answers:
+
+   ```sh
+   hermes wisp connect https://<that name>/mcp
+   hermes mcp test wisp
+   ```
+
+5. If it connected only after a fix (Serve switched on, the Runtime restarted), Hermes gets Wisp back by itself within
+   seconds, or at once with `hermes gateway restart`.
 
 Hermes's install-time scanner gives this plugin a `caution` verdict, with 14 findings, all in the plugin's own code:
 
@@ -37,54 +153,8 @@ Hermes's install-time scanner gives this plugin a `caution` verdict, with 14 fin
   `cat ~/.hermes/.env`) by which Hermes's model could read the credential.
 - `zone.py` holds a pattern of control characters, which it strips from the zone's text before Hermes's prompt sees it.
 
-In a terminal, Hermes lists the findings and asks whether to go on. With no terminal it refuses unless you add
-`--force` to `hermes plugins install`.
-
 The URL is `https://` or loopback; plain http off loopback is refused. `hermes wisp connect --remove` reverses it.
-`hermes mcp test wisp` shows whether the endpoint answers. Nothing of Wisp's is on Hermes's disk, so there is no
-sandbox and no `wisp doctor` here.
-
-## One machine
-
-Don't install from here: `wisp integrate hermes` lays out the copy embedded in the `wisp` binary (this repository's
-committed code) in every Hermes profile, connects it over loopback, and sandboxes Hermes away from Wisp's zone: its data
-directory, the Desk root, the Private Folders and the files outside them Wisp reads its secrets from (`wisp serve
---config`, `WISP_MASTER_KEY_FILE`). On Linux such a file reads as empty inside the sandbox, and a write to it goes nowhere.
-
-### Asked from a chat
-
-When the user asks Hermes in a chat (Telegram, Slack) to install Wisp or this plugin, Hermes runs these steps itself,
-in its terminal. There is no terminal for the installer to ask its questions on, so they are answered up front:
-
-1. Install Wisp and start it as a background service:
-
-   ```sh
-   curl -fsSL https://usewisp.io/runtime/install.sh | WISP_SERVICE=1 sh
-   ```
-
-2. Sign in. Start the login as a background process: it prints a URL and waits for a line on stdin.
-
-   ```sh
-   ~/.wisp/bin/wisp login --manual
-   ```
-
-   Send the URL to the user, ask them to sign in and to send back the URL their browser lands on, then write that URL
-   to the process's stdin.
-
-3. Wire Wisp into Hermes, without the question about moving MCP servers:
-
-   ```sh
-   ~/.wisp/bin/wisp integrate hermes --skip-connectors
-   ```
-
-4. Restart the gateway, which loads the plugin and its sandbox:
-
-   ```sh
-   hermes gateway restart
-   ```
-
-`~/.wisp/bin` reaches `PATH` only in new shells, hence the full path. Hermes's MCP servers can be moved into Wisp later,
-from a terminal, with `wisp integrate hermes --connectors`.
+Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp doctor` here.
 
 ## Known limits
 
@@ -100,6 +170,9 @@ from a terminal, with `wisp integrate hermes --connectors`.
 - On one machine, the sandbox stops Hermes reading Wisp's zone itself, not a model set on escaping it: anything Hermes
   asks an unsandboxed process to run (an app it opens or scripts, a shell startup file or a tool on PATH it rewrites)
   runs outside the sandbox.
+- On one machine, the Runtime replaces its own agent token each time a sandboxed Hermes process starts, so a token
+  Hermes's model saw before the sandbox stops working. A Hermes process still running unsandboxed (a CLI open since
+  before `wisp integrate hermes`) can read the new token as well, until it stops.
 - Under Wisp's sandbox, Hermes's browser runs without Chrome's own sandbox: Chrome's cannot start inside Wisp's, so the
   plugin adds `--no-sandbox` to `AGENT_BROWSER_ARGS`. A Hermes that runs without Wisp's sandbox keeps Chrome's.
 - On Linux, `sudo` and other setuid programs do not work inside the sandboxed Hermes: bubblewrap always sets
