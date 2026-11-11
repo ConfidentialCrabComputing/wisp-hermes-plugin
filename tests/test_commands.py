@@ -364,14 +364,51 @@ print(ctx.commands[{command!r}]({args!r}))""")
         self.assertIn("self-signed certificate", shown)
         self.assertIn("not made", shown)
 
-    def test_wisp_on_a_gateway_whose_answer_breaks_off_says_it_failed(self):
-        shown = self.raising("wisp", "pay the bill", "http.client.IncompleteRead(b'')")
+    def test_wisp_on_a_gateway_whose_ask_wisp_result_fails_its_certificate_check_says_the_task_may_still_be_running(self):
+        # A Run exists: "the connection was not made" alone would have the user start it twice.
+        self.config["mcp_servers"] = {"wisp": {"url": "https://wisp.example:8443/mcp"}}
+        (self.home / ".env").write_text(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}\n")
+        shown = self.hermes("python", """
+import ssl, sys, urllib.error
+sys.modules["__main__"].SURFACE = "telegram"
+ctx = load_plugin()
+def call_tool(url, credential, tool, args, **kwargs):
+    if tool == "ask_wisp":
+        return {"content": [{"type": "text", "text": "still at work"}], "structuredContent": {"run": "r1"}}
+    raise urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed certificate"))
+sys.modules["hermes_plugins_wisp.commands"].call_tool = call_tool
+print(ctx.commands["wisp"]("pay the bill"))""")
+
+        self.assertIn("self-signed certificate", shown)
+        self.assertIn("may still be running", shown)
+
+    def breaking(self, command, args, error):
+        """`command` on a gateway whose transport raises `error` (Python source) for the tool call, past the
+        request: the real `call_tool` meets it."""
+        self.asking_endpoint({})
+        return self.hermes("python", f"""
+import http.client, json, sys
+sys.modules["__main__"].SURFACE = "telegram"
+ctx = load_plugin()
+client = sys.modules["hermes_plugins_wisp.mcp_client"]
+opened = client._open
+def breaking(request, **kwargs):
+    if request.data and json.loads(request.data).get("method") == "tools/call":
+        raise {error}
+    return opened(request, **kwargs)
+client._open = breaking
+print(ctx.commands[{command!r}]({args!r}))""")
+
+    def test_wisp_on_a_gateway_whose_answer_breaks_off_says_the_task_may_still_be_running(self):
+        shown = self.breaking("wisp", "pay the bill", "http.client.IncompleteRead(b'')")
 
         self.assertIn("Wisp's ask_wisp failed", shown)
+        self.assertIn("may still be running", shown)
+        self.assertNotIn("Wisp is not answering", shown)
         self.assertNotIn("Traceback", shown)
 
     def test_wisp_model_on_an_answer_that_is_not_http_says_it_failed(self):
-        shown = self.raising("wisp-model", "", "http.client.BadStatusLine('x')")
+        shown = self.breaking("wisp-model", "", "http.client.BadStatusLine('x')")
 
         self.assertIn("Wisp's wisp_model failed", shown)
         self.assertNotIn("Traceback", shown)

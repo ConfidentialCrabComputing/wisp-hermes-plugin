@@ -246,6 +246,19 @@ Desk root /home/u/.wisp/desks;
         self.assertLess(time.monotonic() - started, 10)
         self.assertIn("/home/u/bank", rule)
 
+    def test_an_answer_that_breaks_off_leaves_the_cached_zone(self):
+        def broken_off(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.end_headers()
+            handler.wfile.write(b"400\r\ndata: {")  # a chunk cut short: the client's read raises IncompleteRead
+            handler.close_connection = True
+
+        self.endpoint(broken_off)
+
+        self.assertIn("/home/u/bank", self.rule(ZONE))
+
     def test_a_malformed_answer_leaves_the_cached_zone(self):
         for body in MALFORMED:
             with self.subTest(body=body):
