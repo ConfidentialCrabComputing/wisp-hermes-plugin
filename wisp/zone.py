@@ -147,9 +147,13 @@ def not_connected(pinned):
     """What the hook refuses with, and the rule says, while this profile names no Wisp endpoint or holds no
     credential: there is no `ask_wisp`, so nothing may route to it. `pinned`: `wisp integrate hermes` put Wisp on
     this machine, and it is the repair; else Wisp is on another machine, and `hermes wisp connect` is."""
-    run = ("`wisp integrate hermes`" if pinned else
-           "`hermes wisp connect https://<host>/mcp` (with the credential `wisp tokens create --name <name> --host-agent` printed)")
-    return f"Wisp is not connected to Hermes: tell the user to run {run} in a terminal, then restart Hermes."
+    return f"Wisp is not connected to Hermes: tell the user to run {_repair(pinned)} in a terminal, then restart Hermes."
+
+
+def _repair(pinned):
+    """The command that connects this profile to Wisp: see `not_connected`."""
+    return ("`wisp integrate hermes`" if pinned else
+            "`hermes wisp connect https://<host>/mcp` (with the credential `wisp tokens create --name <name> --host-agent` printed)")
 
 
 def not_connected_rule(pinned):
@@ -167,20 +171,27 @@ def not_answering():
             "reached): tell the user so, and that Wisp is usually back within a minute; do not do the task another way.")
 
 
-def not_answering_rule(zone):
-    """The routing rule while Wisp does not answer: what is Wisp's, from `zone` when there is one, and that it waits."""
+def rejected(pinned):
+    """What the hook refuses with, and the rule says, while Hermes has given up on the connected Wisp for good: Wisp
+    refused its credential (revoked or replaced) or the address is wrong, and no retry mends either."""
+    return (f"Wisp refused Hermes's credential, or cannot be reached at that address: tell the user to run "
+            f"{_repair(pinned)} again in a terminal, then restart Hermes; do not do the task another way.")
+
+
+def down_rule(zone, down):
+    """The routing rule while Wisp does not answer, `down` saying why: what is Wisp's, from `zone` when there is one."""
     if zone:
-        return routing_rule(zone, answering=False)
+        return routing_rule(zone, down)
     return f"""# Wisp
 Wisp is the user's private agent: it holds the keys to the user's sensitive accounts and reads their private
-files, and you cannot reach them. {not_answering()}
+files, and you cannot reach them. {down}
 Say so whenever the user asks for Wisp or for anything Wisp does."""
 
 
-def session_rule(zone, url, credential, cache, answering=True):
+def session_rule(zone, url, credential, cache, down=None):
     """The routing rule for a session starting now: `zone`'s folders as of Hermes's start (the sandbox closes a folder
     only at a start, so a rule naming one added since would call closed a folder Hermes can still open) with the
-    Connectors the endpoint names now, or the cache's when it does not answer, or the start's. Not `answering`, the
+    Connectors the endpoint names now, or the cache's when it does not answer, or the start's. With Wisp `down`, the
     endpoint is not asked."""
     def answered():
         if not (url and credential):
@@ -191,22 +202,22 @@ def session_rule(zone, url, credential, cache, answering=True):
         return json.loads(cache.read_text())
 
     folders = {key: value for key, value in zone.items() if key not in ("services", "connectors")}
-    for read in (answered, cached) if answering else (cached,):
+    for read in (answered, cached) if down is None else (cached,):
         try:
             answer = read()
             return routing_rule({**folders, "services": answer.get("services") or [],
-                                 **({"connectors": answer["connectors"]} if "connectors" in answer else {})}, answering)
+                                 **({"connectors": answer["connectors"]} if "connectors" in answer else {})}, down)
         except Exception as exc:  # noqa: BLE001 — anything read here is data; the start's rule stands in
             logger.warning("Wisp: no Connectors %s (%r)", read.__name__, exc)
-    return routing_rule(zone, answering)
+    return routing_rule(zone, down)
 
 
-def routing_rule(zone, answering=True):
-    """The system prompt section that sends Wisp's tasks to `ask_wisp` (not `answering`: that names them as Wisp's
-    and says Wisp does not answer), within Hermes's section cap: what does not fit is counted, not listed."""
+def routing_rule(zone, down=None):
+    """The system prompt section that sends Wisp's tasks to `ask_wisp` (with Wisp `down`: names them as Wisp's and
+    says `down`, why Wisp does not answer), within Hermes's section cap: what does not fit is counted, not listed."""
     send = ("""Hand these tasks to the `ask_wisp` tool instead of doing them
 yourself, and relay Wisp's answer; continue a Wisp conversation by passing its `conversation` id back to
-`ask_wisp`:""" if answering else f"""{not_answering()}
+`ask_wisp`:""" if down is None else f"""{down}
 These tasks are Wisp's:""")
     head = f"""# Wisp
 Wisp is the user's private agent. It holds the keys to the user's sensitive accounts and reads their
