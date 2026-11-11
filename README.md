@@ -90,8 +90,8 @@ Hermes does not read `~/.wisp` or `~/.config/wisp` itself, not even while a step
 
    Run from Hermes's own terminal, Hermes reloads under this command as it enables the plugin, and the turn ends there.
    `integrate` goes on, and what it says from then on is in `wisp-integrate.log` in Hermes's home (`~/.hermes`). On
-   Linux, if the log names a fix "Before the restart", the user runs it as root (Hermes cannot: no `sudo` works inside
-   its sandbox).
+   Linux, if the log names a fix "Before the restart", Hermes runs without the sandbox until it is applied: Hermes
+   gives it to the user to run as root (without its leading `sudo`), and the user then sends `/restart`.
 
 That reload is the last step: no restart command follows. The user checks the result with a Wisp task, or Hermes with
 `hermes mcp test wisp`; Hermes can read the log to say how `integrate` ended. Hermes asks the user to send `/restart` in
