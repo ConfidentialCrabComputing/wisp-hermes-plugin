@@ -338,8 +338,9 @@ def main(argv):
         load_plugin()
         signal.pause()
     elif argv[:1] == ["python"] and len(argv) == 2:
-        # Not Hermes's: Python run in this process, which loads the plugin by calling `load_plugin()`.
-        exec(argv[1], {"load_plugin": load_plugin})
+        # Not Hermes's: Python run in this process, which loads the plugin by calling `load_plugin()` and runs its
+        # hooks with `pre_tool_call(ctx, tool_name, args)`.
+        exec(argv[1], {"load_plugin": load_plugin, "pre_tool_call": pre_tool_call})
     else:
         plugin_command(argv)
 
