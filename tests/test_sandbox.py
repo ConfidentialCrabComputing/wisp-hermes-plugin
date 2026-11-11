@@ -1107,6 +1107,15 @@ class Pin(HermesHome):
         self.assertEqual(self.called[-1], "wisp_sealed")
         self.assertNotIn(UNPROTECTED, done.stderr)
 
+    @sandboxed
+    def test_the_plugin_loaded_again_in_a_sandboxed_process_never_asks_again_to_replace_the_token(self):
+        # A forced rediscovery loads the plugin again in the same process: nothing started.
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+
+        done = self.python("load_plugin(); load_plugin()")
+
+        self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+
     def test_an_unsandboxed_start_never_asks_to_replace_the_token(self):
         elsewhere = self.tmp / "elsewhere"
         self.pin = {**self.pin, "dataDir": str(elsewhere), "deskRoot": str(elsewhere / "desks"), "privateFolders": []}

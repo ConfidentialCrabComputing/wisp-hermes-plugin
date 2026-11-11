@@ -404,6 +404,39 @@ time.sleep(10)""", FAKE_HERMES_WISP_STATUS="failed")
         # Hermes's start reads the zone, the first look asks, the next does not, the new credential is asked.
         self.assertEqual(asked, ["Bearer wisp_hermes_s3cr3t"] * 2 + ["Bearer wisp_hermes_n3w"])
 
+    def refused_then_loaded_again(self, script):
+        """What `script` prints in a running Hermes whose `wisp` Hermes failed, its credential refused (401) by the time
+        the plugin is loaded again (a forced rediscovery): `first` and `again` are the two loads' contexts, `told(ctx)`
+        the rule a session starting now gets from `ctx` and the hook's answer to an `ask_wisp` call."""
+        (self.home / "plugins" / "wisp" / "zone.json").write_text(json.dumps(ZONE))
+        self.endpoint(lambda handler: handler.send_error(401))
+        return self.hermes("python", f"""import json, os, time
+def told(ctx):
+    return ctx.sections["wisp-routing"]({{}}), pre_tool_call(ctx, "mcp__wisp__ask_wisp", {{"task": "x"}})
+first = load_plugin()
+time.sleep(2)  # the first look asks Wisp
+again = load_plugin()
+{script}""", FAKE_HERMES_WISP_STATUS="failed")
+
+    def test_a_refused_credential_is_told_by_the_plugin_loaded_again_in_the_same_process(self):
+        out = self.refused_then_loaded_again("print(json.dumps(told(again)))")
+
+        for told in json.loads(out):
+            self.assertIn("refused Hermes's credential", told)
+            self.assertIn("`hermes wisp connect https://<host>/mcp`", told)
+
+    def test_a_refusal_cleared_once_wisp_connects_is_cleared_for_every_load(self):
+        # Seen connected through the second load, then failed again before the next look: Wisp is not answering, to
+        # the first load as to the second.
+        out = self.refused_then_loaded_again("""os.environ["FAKE_HERMES_WISP_STATUS"] = "connected"
+told(again)
+os.environ["FAKE_HERMES_WISP_STATUS"] = "failed"
+print(json.dumps([*told(first), *told(again)]))""")
+
+        for told in json.loads(out):
+            self.assertIn("Wisp is not answering", told)
+            self.assertNotIn("refused Hermes's credential", told)
+
     def test_wisp_that_never_connected_because_its_endpoint_refused_is_reconnected_once_it_answers(self):
         port = int(self.config["mcp_servers"]["wisp"]["url"].rsplit(":", 1)[1].split("/")[0])
         # Hermes failed `wisp` at its start, the Runtime down; it answers a moment later.
