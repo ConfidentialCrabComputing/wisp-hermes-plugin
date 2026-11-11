@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import commands, connect
 from .hook import make_hook
-from .mcp_client import loopback, refuses
+from .mcp_client import call_tool, loopback, refuses
 from .sandbox import UNPROTECTED, protect
 from .zone import (PIN, ZONE_CACHE, down_rule, load_pin, load_zone, not_answering, not_connected, not_connected_rule,
                    pinned_zone, rejected, routing_rule, SESSION_TIMEOUT, session_rule)
@@ -141,6 +141,7 @@ def register(ctx):
         return unconnected() or down()
 
     zone = pin = None
+    live = False  # the pinned endpoint answered `wisp_zone` at this start, not the cache
     rule = ""
     protected = False
     unread = None  # Wisp on another machine whose zone the start could not read: its URL
@@ -149,7 +150,7 @@ def register(ctx):
         if pin is not None:
             # Pinned, the URL is integrate's (Hermes's model can repoint `config.yaml`'s at its own endpoint), and the pin
             # alone is a zone: whatever fails in reading more, the sandbox, the hook and the rule have it.
-            zone = pinned_zone(pin, credential, ZONE_CACHE)
+            zone, live = pinned_zone(pin, credential, ZONE_CACHE)
         else:
             url = ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
             zone = load_zone(url, credential(), ZONE_CACHE)
@@ -163,11 +164,20 @@ def register(ctx):
         if zone is not None:
             # After the zone is cached: the sandbox denies writes beside the plugin.
             # On Linux, sandboxed, the process is re-exec'd under bubblewrap here, through the pinned `wisp`.
-            for warning in protect(zone, Path(__file__).resolve().parent, get_config_path().parent,
-                                   pinned=pin, wisp=(pin or {}).get("wisp")):
+            warnings = protect(zone, Path(__file__).resolve().parent, get_config_path().parent,
+                               pinned=pin, wisp=(pin or {}).get("wisp"))
+            for warning in warnings:
                 _warn(warning)
             protected = True
             rule = routing_rule(zone)
+            if live and not any(warning.startswith(UNPROTECTED) for warning in warnings):
+                # Sandboxed now, beside the Runtime that just answered: the agent token read before this start could
+                # reach the model, so the Runtime replaces it. Every such start asks, so the last replacement is one
+                # asked from inside a sandbox.
+                try:
+                    call_tool(pin["url"], credential(), "wisp_sealed")
+                except Exception as exc:  # noqa: BLE001 — the token stays as it was; the start goes on
+                    logger.warning("Wisp: could not have the Runtime replace its agent token: %r", exc)
     except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, never a failed load
         logger.warning("Wisp: no routing rule, the zone is malformed: %r", exc)
         if not protected and pinned:

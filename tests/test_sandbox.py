@@ -1014,7 +1014,8 @@ class Pin(HermesHome):
         return super().hermes(*argv, **kwargs)
 
     def endpoint(self, zone):
-        """A fake Wisp MCP endpoint whose `wisp_zone` answers `zone`; its URL."""
+        """A fake Wisp MCP endpoint whose `wisp_zone` answers `zone`; its URL. The tools asked for go to `self.called`."""
+        called = self.called = []
 
         class Mcp(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -1023,6 +1024,8 @@ class Pin(HermesHome):
                     self.send_response(202)
                     self.end_headers()
                     return
+                if message["method"] == "tools/call":
+                    called.append(message["params"]["name"])
                 result = ({"content": [], "structuredContent": zone} if message["method"] == "tools/call"
                           else {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "wisp"}})
                 body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
@@ -1092,6 +1095,46 @@ class Pin(HermesHome):
         rule = json.loads(self.hermes("sections").stdout)["wisp-routing"]
 
         self.assertIn("Wisp's services: Acme CRM (my-crm);", rule)
+
+    @sandboxed
+    def test_a_sandboxed_start_asks_the_runtime_once_to_replace_its_token(self):
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+
+        done = self.python("load_plugin()")
+
+        # On Linux the process before bubblewrap's re-exec asked for the zone too, and never got further.
+        self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+        self.assertEqual(self.called[-1], "wisp_sealed")
+        self.assertNotIn(UNPROTECTED, done.stderr)
+
+    def test_an_unsandboxed_start_never_asks_to_replace_the_token(self):
+        elsewhere = self.tmp / "elsewhere"
+        self.pin = {**self.pin, "dataDir": str(elsewhere), "deskRoot": str(elsewhere / "desks"), "privateFolders": []}
+        self.pin["url"] = self.endpoint({**self.pin, "services": []})
+
+        done = self.python("load_plugin()")
+
+        self.assertIn(UNPROTECTED, done.stderr)
+        self.assertEqual(self.called, ["wisp_zone"])
+
+    @sandboxed
+    def test_a_start_without_a_pin_never_asks_to_replace_the_token(self):
+        self.pin = None
+        self.repoint(self.endpoint(self.valid_zone([self.bank])))
+
+        self.python("load_plugin()")
+
+        self.assertNotIn("wisp_sealed", self.called)
+
+    @sandboxed
+    def test_a_start_on_the_cached_zone_never_asks_to_replace_the_token(self):
+        self.pin["url"] = self.endpoint(None)
+        (self.plugin / "zone.json").write_text(json.dumps(self.valid_zone([self.bank])))
+
+        done = self.python("load_plugin()")
+
+        self.assertNotIn(UNPROTECTED, done.stderr)
+        self.assertEqual(set(self.called), {"wisp_zone"})
 
     def malformed_zones(self):
         """What an answer or a cached zone can hold that no folder can be: (what, the zone)."""
