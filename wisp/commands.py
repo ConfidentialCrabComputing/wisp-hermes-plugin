@@ -43,8 +43,11 @@ def wisp(ctx, raw_args, unavailable=lambda: None):
         def call(tool, args):
             try:
                 result = call_tool(*endpoint, tool, args, timeout=WAIT, elicit=lambda message: _ask(ctx, message))
-            except urllib.error.HTTPError as exc:  # Wisp answered: its word, not that it is down
-                return {"error": f"Wisp's {tool} failed: {exc}"}
+            except urllib.error.HTTPError as exc:
+                # Only `ask_wisp`'s 4xx is Wisp's refusal, before any Run; a 5xx may come from a hop between after
+                # Wisp took the request, and a `wisp_result` follows a Run that exists.
+                running = "" if tool == "ask_wisp" and exc.code < 500 else "; the task may still be running in Wisp"
+                return {"error": f"Wisp's {tool} failed: {exc}{running}"}
             except urllib.error.URLError as exc:
                 if isinstance(exc.reason, ssl.SSLCertVerificationError):  # reached something, but not provably Wisp
                     host = urllib.parse.urlsplit(endpoint[0]).hostname
@@ -58,13 +61,13 @@ def wisp(ctx, raw_args, unavailable=lambda: None):
                     return {"error": not_answering()}
                 return {"error": f"Wisp could not be reached for {tool} ({exc.reason}); the task may still be running "
                                  "in Wisp"}
-            # Raw, after the request was sent (or an answer to Wisp's own request that could not be sent): Wisp may
-            # have started a Run, and "not answering, try again" would start it twice.
+            # Raw, after the request was sent (an answer that never came whole, or an answer to Wisp's own request
+            # that could not be sent): Wisp may have started a Run, and "not answering, try again" would start it twice.
             except TimeoutError as exc:
                 return {"error": f"Wisp's {tool} failed: it timed out ({exc}); the task may still be running in Wisp"}
             except OSError as exc:
                 return {"error": f"Wisp's {tool} failed: {exc}; the task may still be running in Wisp"}
-            except (McpError, ValueError) as exc:
+            except (McpError, ValueError) as exc:  # Wisp's own refusal, or a malformed endpoint URL before any send
                 return {"error": f"Wisp's {tool} failed: {exc}"}
             structured = result.get("structuredContent")
             return {"result": "\n".join(c.get("text", "") for c in result.get("content", [])),

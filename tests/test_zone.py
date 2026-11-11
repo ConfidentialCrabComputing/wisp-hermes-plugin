@@ -259,6 +259,17 @@ Desk root /home/u/.wisp/desks;
 
         self.assertIn("/home/u/bank", self.rule(ZONE))
 
+    def test_a_stream_that_ends_with_no_answer_leaves_the_cached_zone(self):
+        def unanswered(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            handler.wfile.write(b": keep\n\n")  # HTTP/1.0: the close ends the stream cleanly
+
+        self.endpoint(unanswered)
+
+        self.assertIn("/home/u/bank", self.rule(ZONE))
+
     def test_a_malformed_answer_leaves_the_cached_zone(self):
         for body in MALFORMED:
             with self.subTest(body=body):

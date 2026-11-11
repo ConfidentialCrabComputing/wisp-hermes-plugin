@@ -31,7 +31,7 @@ _open = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect
 
 
 class McpError(Exception):
-    """The endpoint answered, but not with the tool's result."""
+    """Wisp answered the call itself, with a JSON-RPC error or a tool error."""
 
 
 def loopback(url):
@@ -65,8 +65,8 @@ def refuses(url, timeout=1.0):
 
 def call_tool(url, credential, name, arguments=None, timeout=5.0, elicit=None):
     """The `CallToolResult` of tool `name`; raises `McpError` for a refusal or a tool error and `OSError`
-    when the endpoint cannot be reached or its answer breaks off, or `TimeoutError` when the whole call outlasts
-    `timeout`. With `elicit`, the client declares elicitation and answers each of the server's form elicitations with
+    when the endpoint cannot be reached or its answer never comes whole (an `HTTPError` for a refusal by status), or
+    `TimeoutError` when the whole call outlasts `timeout`. With `elicit`, the client declares elicitation and answers each of the server's form elicitations with
     `elicit(message)`: "accept", "decline" or "cancel"."""
     session = {}
     deadline = time.monotonic() + timeout
@@ -92,7 +92,10 @@ def call_tool(url, credential, name, arguments=None, timeout=5.0, elicit=None):
                     session["id"] = response.headers["Mcp-Session-Id"]
                 if message is None or "id" not in message or "method" not in message:
                     return None  # a notification or our answer to a request of the server's
-                return _answer(response, message["id"], left, reply)
+                try:
+                    return _answer(response, message["id"], left, reply)
+                except ValueError as exc:  # a body or an SSE line that does not parse
+                    raise OSError(f"the endpoint's answer is not JSON ({exc})") from exc
         except http.client.HTTPException as exc:
             # An answer broken off or not HTTP, after the request was sent: a network failure, as every caller takes it.
             raise OSError(f"the endpoint's answer broke off or was not HTTP ({exc!r})") from exc
@@ -130,20 +133,23 @@ def call_tool(url, credential, name, arguments=None, timeout=5.0, elicit=None):
                 send(None, method="DELETE")
             except OSError:
                 pass
+    if "error" in called:
+        raise McpError(f"{name} refused: {called['error']}")
     if "result" not in called:
-        raise McpError(f"{name} refused: {called.get('error')}")
+        raise OSError(f"{name}'s answer has neither a result nor an error")
     result = _object(called["result"], f"{name}'s result")
     content = result.get("content", [])
     if not isinstance(content, list) or not all(isinstance(c, dict) for c in content):
-        raise McpError(f"{name}'s content is not a list of objects")
+        raise OSError(f"{name}'s content is not a list of objects")
     if result.get("isError"):
         raise McpError(" ".join(c.get("text", "") for c in content) or f"{name} failed")
     return result
 
 
 def _object(value, what):
+    """`value`, a JSON-RPC answer's object; anything else is no answer, as a network failure is."""
     if not isinstance(value, dict):
-        raise McpError(f"{what} is not an object")
+        raise OSError(f"{what} is not an object")
     return value
 
 
@@ -176,7 +182,7 @@ def _answer(response, request_id, left, reply):
     # while the user takes their time, as the server takes an unanswered one for a dropped connection. Either thread's
     # failure comes back here, where it ends the call.
     events = queue.Queue()
-    closed = McpError("the endpoint closed the stream without an answer")
+    closed = OSError("the endpoint closed the stream without an answer")
     if response.isclosed():  # an empty body: no socket left to read
         raise closed
 
