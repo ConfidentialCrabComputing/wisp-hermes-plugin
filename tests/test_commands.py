@@ -6,6 +6,7 @@ import itertools
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -41,10 +42,10 @@ class Commands(unittest.TestCase):
         shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
         self.config = {"plugins": {"enabled": ["wisp"]}}
 
-    def hermes(self, *argv, tools=None, choice=None):
+    def hermes(self, *argv, tools=None, choice=None, **fake):
         (self.home / "config.yaml").write_text(json.dumps(self.config))
         (self.home / "tools.json").write_text(json.dumps(tools or {}))
-        env = {**os.environ, "HERMES_HOME": str(self.home), "PATH": f"{FAKE}{os.pathsep}{os.environ['PATH']}"}
+        env = {**os.environ, "HERMES_HOME": str(self.home), "PATH": f"{FAKE}{os.pathsep}{os.environ['PATH']}", **fake}
         env.pop("FAKE_HERMES_CHOICE", None)
         if choice is not None:
             env["FAKE_HERMES_CHOICE"] = choice
@@ -80,6 +81,7 @@ class Commands(unittest.TestCase):
             return []
 
     def test_wisp_hands_the_task_to_ask_wisp_and_shows_its_answer(self):
+        self.endpoint("unused")  # a connected profile
         shown = self.slash("wisp", "what is my balance?",
                            {"mcp__wisp__ask_wisp": [answered("The balance is 42.")]})
 
@@ -87,6 +89,7 @@ class Commands(unittest.TestCase):
         self.assertIn("The balance is 42.", shown)
 
     def test_wisp_on_running_asks_wisp_result_until_the_answer(self):
+        self.endpoint("unused")  # a connected profile
         shown = self.slash("wisp", "summarise my mail", {
             "mcp__wisp__ask_wisp": [running("r1")],
             "mcp__wisp__wisp_result": [running("r1"), answered("Three bills are due.")],
@@ -100,9 +103,21 @@ class Commands(unittest.TestCase):
         self.assertIn("Three bills are due.", shown)
 
     def test_wisp_shows_a_failed_call(self):
+        self.endpoint("unused")  # a connected profile
         shown = self.slash("wisp", "pay the bill", {"mcp__wisp__ask_wisp": [{"error": "Wisp is not signed in."}]})
 
         self.assertIn("Wisp is not signed in.", shown)
+
+    def test_wisp_while_hermes_parked_wisp_says_wisp_is_not_answering_never_unknown_tool(self):
+        self.endpoint("unused")
+        # Hermes deregisters a parked server's tools.
+        tools = {"mcp__wisp__ask_wisp": [{"error": "Unknown tool: mcp__wisp__ask_wisp"}]}
+
+        shown = self.hermes("slash", "wisp", "pay the bill", tools=tools,
+                            FAKE_HERMES_WISP_STATUS="failed", FAKE_HERMES_WISP_RECONNECTING="1")
+
+        self.assertIn("Wisp is not answering", shown)
+        self.assertNotIn("Unknown tool", shown)
 
     def endpoint(self, answer, raw=None):
         """A fake Wisp MCP endpoint whose tools answer `answer`, or the body `raw` whole; returns the `tools/call`
@@ -253,6 +268,18 @@ class Commands(unittest.TestCase):
         self.assertEqual([call for call in self.calls if call[0] != "wisp_zone"], [
             ["ask_wisp", {"task": "summarise my mail"}], ["wisp_result", {"run": "r1"}], ["wisp_result", {"run": "r1"}]])
         self.assertIn("Three bills are due.", shown)
+
+    def test_wisp_on_a_gateway_against_a_refusing_endpoint_says_wisp_is_not_answering_never_the_error(self):
+        with socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))
+            port = closed.getsockname()[1]
+        self.config["mcp_servers"] = {"wisp": {"url": f"http://127.0.0.1:{port}/mcp"}}
+        (self.home / ".env").write_text(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}\n")
+
+        shown = self.message("wisp", "summarise my mail")
+
+        self.assertIn("Wisp is not answering", shown)
+        self.assertNotIn("urlopen error", shown)
 
     def test_wisp_on_a_gateway_without_a_connected_endpoint_says_so(self):
         self.assertIn("hermes wisp connect", self.message("wisp", "summarise my mail"))
