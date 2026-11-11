@@ -107,8 +107,9 @@ def widen(pin, answer):
 
 
 def pinned_zone(pin, credential, cache):
-    """The pinned zone, widened by the endpoint's answer, or else by the cached one. Everything read beyond the pin is
-    data: a failure of any kind means no answer, and only a well-formed answer is cached. Only a pin of the wrong shape raises."""
+    """The pinned zone, widened by the endpoint's answer, or else by the cached one, and whether the endpoint answered.
+    Everything read beyond the pin is data: a failure of any kind means no answer, and only a well-formed answer is
+    cached. Only a pin of the wrong shape raises."""
     def answered():
         token = credential()
         if not token:
@@ -125,10 +126,10 @@ def pinned_zone(pin, credential, cache):
 
     for read in (answered, cached):
         try:
-            return read()
+            return read(), read is answered
         except Exception as exc:  # noqa: BLE001 — a process on the pinned port, or in the cache, can make any of them
             logger.warning("Wisp: no zone %s (%r)", read.__name__, exc)
-    return widen(pin, None)
+    return widen(pin, None), False
 
 
 def _inert(text):
