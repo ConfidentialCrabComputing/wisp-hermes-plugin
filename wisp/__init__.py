@@ -6,6 +6,7 @@ import logging
 import sys
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
 from . import commands, connect
@@ -22,6 +23,8 @@ MOVED = Path(__file__).resolve().parent / "moved.json"
 # How often a parked `wisp` is looked at: Wisp is back within this of its Runtime, then a turn for the tools to reach
 # an open session (Hermes refreshes its tool list between turns).
 REVIVE_EVERY = 10
+# What the revive thread does about a `wisp` Hermes has failed: ask Hermes to reconnect it, or first ask Wisp.
+RECONNECT, ASK = "reconnect", "ask"
 
 
 def _warn(line):
@@ -75,32 +78,50 @@ def register(ctx):
             connected = False
         return None if connected else not_connected(pinned)
 
-    # Whether this process saw `wisp`'s loopback endpoint refuse since `wisp` last connected or was reconnected: a
-    # `wisp` Hermes failed meanwhile failed for a Runtime that was down, so it heals once the endpoint listens, though
-    # Hermes, when it never connected it, does not call it reconnecting.
-    saw_refuse = [False]
+    # The URL and credential Wisp itself refused (a 401 or 403 to `wisp_zone`) while Hermes had failed `wisp`, or None.
+    # Hermes's word alone cannot tell a refusal: it calls no server reconnecting that never connected in this process,
+    # a Runtime down at Hermes's start as much as a revoked credential. Cleared once Hermes connects `wisp`.
+    refusal = [None]
 
     def hermes_wisp():
         """Hermes's MCP client's view of `wisp`: None while it answers (or with no client loaded: only a Hermes that
-        connects its MCP servers, a chat or a gateway, has one), else what is wrong and whether a reconnect would
-        mend it now: `(down, revive)`. Down while nothing listens on its loopback endpoint (Hermes notices a stopped
-        Runtime only some seconds later) or while Hermes has parked it (or failed to connect it); a park heals only
-        while Hermes says so (`mcp_server_reconnecting`: false on a permanent error, a refused credential, a wrong
-        path) or after the endpoint was seen refusing."""
+        connects its MCP servers, a chat or a gateway, has one), else what is wrong and what the revive thread should
+        do now: `(down, mend)`, `mend` one of `RECONNECT`, `ASK` (Wisp, whether it refuses Hermes's credential) or
+        None. Down while nothing listens on its loopback endpoint (Hermes notices a stopped Runtime only some seconds
+        later) or while Hermes has parked it (or failed to connect it); refused only once Wisp said so."""
         discovery = sys.modules.get("tools.mcp_tool_discovery")
         if discovery is None:
             return None
         entry = (read_raw_config().get("mcp_servers") or {}).get("wisp") or {}
         if refuses(entry.get("url")):
-            saw_refuse[0] = True
-            return not_answering(), False
-        if not any(status.get("name") == "wisp" and status.get("status") == "failed"
-                   for status in discovery.get_mcp_status({"wisp": entry})):
-            saw_refuse[0] = False
+            return not_answering(), None
+        statuses = {status.get("status") for status in discovery.get_mcp_status({"wisp": entry})
+                    if status.get("name") == "wisp"}
+        if "connected" in statuses:
+            refusal[0] = None
+        if "failed" not in statuses:
             return None
-        if saw_refuse[0] or discovery.mcp_server_reconnecting("wisp"):
-            return not_answering(), True
-        return rejected(pinned), False
+        if discovery.mcp_server_reconnecting("wisp"):
+            return not_answering(), RECONNECT
+        if refusal[0] == (entry.get("url"), credential()):
+            return rejected(pinned), None
+        return not_answering(), ASK
+
+    def ask():
+        """Asks the configured endpoint, as Hermes would connect it, whether it takes Hermes's credential: `RECONNECT`
+        when it answers, else None, keeping a 401 or 403 as the refusal."""
+        url = ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
+        token = credential()
+        try:
+            call_tool(url, token, "wisp_zone", timeout=SESSION_TIMEOUT)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                refusal[0] = (url, token)
+            return None
+        except Exception as exc:  # noqa: BLE001 — not answering, asked again at the next look
+            logger.debug("Wisp: not answering at %s: %r", url, exc)
+            return None
+        return RECONNECT
 
     def down():
         """None while the connected Wisp answers, else why it does not. A Hermes that connects no MCP server has no
@@ -115,19 +136,22 @@ def register(ctx):
     def revive():
         """Asks Hermes to reconnect a parked `wisp` that heals once its endpoint takes connections again, at Hermes's
         start and every `REVIVE_EVERY` s after: Hermes's own retry of a parked server comes every 300 s, and each
-        restart of the Runtime (every `wisp update`) can park it. A remote endpoint is never probed here, so one
-        Hermes calls reconnecting is reconnected at each look: Hermes's connect is then the probe. Never a park that
-        does not heal: an explicit reconnect skips the gate Hermes holds a permanent error behind.
+        restart of the Runtime (every `wisp update`) can park it. A remote endpoint is never probed for listening, so
+        one Hermes calls reconnecting is reconnected at each look: Hermes's connect is then the probe. One Hermes does not
+        call reconnecting is reconnected only once Wisp answers, and never once Wisp refused its credential: an
+        explicit reconnect skips the gate Hermes holds a permanent error behind.
         ponytail: the default profile's `wisp` only; under a gateway serving several profiles the others wait for
         Hermes's own retry or a new session's discovery."""
         refused = False
         while True:
             try:
                 known = None if unconnected() else hermes_wisp()
-                if known and known[1]:
+                mend = known and known[1]
+                if mend == ASK:
+                    mend = ask()
+                if mend == RECONNECT:
                     from tools.mcp_tool_loop import reconnect_mcp_server
                     logger.debug("Wisp: asking Hermes to reconnect wisp")
-                    saw_refuse[0] = False
                     accepted = reconnect_mcp_server("wisp")
                     if not accepted and not refused:
                         logger.warning("Wisp: Hermes refused to reconnect wisp")
