@@ -43,15 +43,19 @@ def wisp(ctx, raw_args, unavailable=lambda: None):
                 result = call_tool(*endpoint, tool, args, timeout=WAIT, elicit=lambda message: _ask(ctx, message))
             except urllib.error.HTTPError as exc:  # Wisp answered: its word, not that it is down
                 return {"error": f"Wisp's {tool} failed: {exc}"}
-            except urllib.error.URLError:
+            except urllib.error.URLError as exc:
                 # urllib wraps in a URLError only what fails in the connect or the send: the request never reached Wisp.
-                return {"error": not_answering()}
-            # Raw, after the request was sent: Wisp may have started a Run, and "not answering, try again" would
-            # start it twice.
+                # Only before `ask_wisp` reached it can no Run exist; a `wisp_result` follows one that does.
+                if tool == "ask_wisp":
+                    return {"error": not_answering()}
+                return {"error": f"Wisp could not be reached for {tool} ({exc.reason}); the task may still be running "
+                                 "in Wisp"}
+            # Raw, after the request was sent (or an answer to Wisp's own request that could not be sent): Wisp may
+            # have started a Run, and "not answering, try again" would start it twice.
             except TimeoutError as exc:
                 return {"error": f"Wisp's {tool} failed: it timed out ({exc}); the task may still be running in Wisp"}
             except OSError as exc:
-                return {"error": f"Wisp's {tool} failed: {exc}"}
+                return {"error": f"Wisp's {tool} failed: {exc}; the task may still be running in Wisp"}
             except (McpError, ValueError) as exc:
                 return {"error": f"Wisp's {tool} failed: {exc}"}
             structured = result.get("structuredContent")

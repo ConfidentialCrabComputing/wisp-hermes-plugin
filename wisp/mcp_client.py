@@ -8,6 +8,7 @@ import ipaddress
 import json
 import socket
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -99,7 +100,11 @@ def call_tool(url, credential, name, arguments=None, timeout=5.0, elicit=None):
             answer = {"result": {"action": action, **({"content": {}} if action == "accept" else {})}}
         else:
             answer = {"error": {"code": -32601, "message": f"{request['method']} is not supported"}}
-        send({"jsonrpc": "2.0", "id": request["id"], **answer})
+        try:
+            send({"jsonrpc": "2.0", "id": request["id"], **answer})
+        except urllib.error.URLError as exc:
+            # Not a URLError: the tool call reached the endpoint already, unlike a connect that fails before it.
+            raise OSError(f"the answer to {request['method']} could not be sent: {exc}") from exc
 
     initialized = _object(send({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
