@@ -343,6 +343,46 @@ Desk root /home/u/.wisp/desks;
         self.assertIn("Wisp is not answering", rule)
         self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
 
+    def test_connected_after_the_load_a_new_session_is_told_to_route_to_wisp_and_its_connectors(self):
+        # README's two machines: the plugin is enabled into a running gateway, then `hermes wisp connect` succeeds.
+        self.answers({**ZONE, "connectors": [{"name": "gmail", "displayName": "Gmail", "status": "connected"}]})
+        connected = json.dumps(self.config)
+        self.config.pop("mcp_servers")
+
+        rule = self.live(f"""with open({str(self.home / "config.yaml")!r}, "w") as config:
+    config.write({connected!r})
+print(told()[0])""")
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn("Gmail (gmail)", rule)
+
+    def back_later(self, host, zone=ZONE):
+        """The sections of a session before and of one after Wisp at `host`, not answering at the load with no zone
+        cached, answers `zone`."""
+        (self.home / "plugins" / "wisp" / "zone.json").unlink(missing_ok=True)
+        port = int(_closed_url().rsplit(":", 1)[1].split("/")[0])
+        self.config["mcp_servers"]["wisp"]["url"] = f"http://{host}:{port}/mcp"
+        self.answers_later(port, 3, zone)
+        return json.loads(self.live("""before = told()[0]
+time.sleep(4)
+print(json.dumps([before, told()[0]]))"""))
+
+    def test_a_wisp_back_since_the_load_gives_a_new_session_the_routing_rule(self):
+        # Another machine (an address the plugin does not take for loopback), and an unpinned `ssh -L` tunnel.
+        for host in ("0.0.0.0", "127.0.0.1"):
+            with self.subTest(host):
+                before, after = self.back_later(host)
+
+                self.assertIn("Wisp is not answering", before)
+                self.assertNotIn("Hand these tasks to the `ask_wisp` tool", before)
+                self.assertIn("Hand these tasks to the `ask_wisp` tool", after)
+                self.assertIn("gmail", after)
+
+    def test_a_zone_of_a_wrong_shape_after_a_load_with_none_leaves_the_section_blank(self):
+        _, after = self.back_later("127.0.0.1", {"privateFolders": [{"name": "bank"}]})
+
+        self.assertEqual(after, "")
+
     def asked_wisp(self, **env):
         """What the hook answers an `ask_wisp` call, as an open session whose tool list still has it makes one."""
         call = [["mcp__wisp__ask_wisp", {"task": "How many unread emails do I have?"}]]
