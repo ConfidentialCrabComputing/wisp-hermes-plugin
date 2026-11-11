@@ -81,7 +81,10 @@ def register(ctx):
     # The URL and credential Wisp itself refused (a 401 or 403 to `wisp_zone`) while Hermes had failed `wisp`, or None.
     # Hermes's word alone cannot tell a refusal: it calls no server reconnecting that never connected in this process,
     # a Runtime down at Hermes's start as much as a revoked credential. Cleared once Hermes connects `wisp`.
-    refusal = [None]
+    # Kept on the revive thread, one per process: a forced rediscovery loads every plugin again, a fresh module each
+    # time, in the same process, and its load reads and clears the verdict the process's one revive thread writes.
+    revival = next((thread for thread in threading.enumerate() if thread.name == "wisp-revive"), None)
+    refusal = getattr(revival, "refusal", None) or [None]
 
     def hermes_wisp():
         """Hermes's MCP client's view of `wisp`: None while it answers (or with no client loaded: only a Hermes that
@@ -194,10 +197,12 @@ def register(ctx):
                 _warn(warning)
             protected = True
             rule = routing_rule(zone)
-            if live and not any(warning.startswith(UNPROTECTED) for warning in warnings):
+            if live and revival is None and not any(warning.startswith(UNPROTECTED) for warning in warnings):
                 # Sandboxed now, beside the Runtime that just answered: the agent token read before this start could
                 # reach the model, so the Runtime replaces it. Every such start asks, so the last replacement is one
-                # asked from inside a sandbox.
+                # asked from inside a sandbox. A load again in a process that already loaded the plugin (its revive
+                # thread runs) is no start: a client holding the token it was just given keeps it. Bubblewrap's
+                # child is a new process, so it asks.
                 try:
                     call_tool(pin["url"], credential(), "wisp_sealed")
                 except Exception as exc:  # noqa: BLE001 — the token stays as it was; the start goes on
@@ -239,5 +244,7 @@ def register(ctx):
         hook = make_hook(None, config_path, unavailable=unavailable)
     ctx.register_hook("pre_tool_call", hook)
     # Once per process: a forced rediscovery loads every plugin again, a fresh module each time, in the same process.
-    if not any(thread.name == "wisp-revive" for thread in threading.enumerate()):
-        threading.Thread(target=revive, name="wisp-revive", daemon=True).start()
+    if revival is None:
+        revival = threading.Thread(target=revive, name="wisp-revive", daemon=True)
+        revival.refusal = refusal
+        revival.start()
