@@ -395,6 +395,32 @@ except OSError:
 
         self.assertIn(UNPROTECTED, self.python("load_plugin()").stderr)
 
+    def rule(self):
+        """The routing rule of a session, connected to a loopback port nothing listens on: the zone from the cache."""
+        closed = socket.create_server(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        (self.home / "config.yaml").write_text(json.dumps(
+            {"plugins": {"enabled": ["wisp"]}, "mcp_servers": {"wisp": {"url": f"http://127.0.0.1:{port}/mcp"}}}))
+        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
+        return json.loads(self.hermes("sections").stdout)["wisp-routing"]
+
+    @posix
+    def test_a_start_left_unprotected_does_not_call_wisps_folders_out_of_reach(self):
+        # A Private Folder holding Hermes's home is left out of the sandbox.
+        self.zone["privateFolders"] = [{"path": str(self.tmp)}]
+
+        rule = self.rule()
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn(str(self.tmp), rule)
+        self.assertIn("this Hermes is not sandboxed from them", rule)
+        self.assertNotIn("you cannot reach them", rule)
+
+    @sandboxed
+    def test_a_sandboxed_start_calls_wisps_folders_out_of_reach(self):
+        self.assertIn("you cannot reach them", self.rule())
+
     def test_a_zone_it_cannot_read_from_another_machine_is_a_connection_problem_not_unprotected(self):
         # Connected over https to an endpoint that does not answer, with no zone cached: no sandbox here by design.
         (self.home / "config.yaml").write_text(json.dumps(

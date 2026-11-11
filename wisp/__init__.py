@@ -174,6 +174,14 @@ def register(ctx):
     live = False  # the pinned endpoint answered `wisp_zone` at this start, not the cache
     rule = ""
     protected = False
+    sandboxed = False  # `protect` ran at this start with no "unprotected" warning; no running process changes it
+    start_closed = False  # what the start's rule says of Wisp's files; with no rule, nothing closed them
+
+    def closed(url):
+        """Whether this process is closed off from Wisp's files: sandboxed at its start, or Wisp at `url` on another
+        machine."""
+        return sandboxed or not loopback(url)
+
     try:
         pin = load_pin(PIN)
         if pin is not None:
@@ -197,8 +205,10 @@ def register(ctx):
             for warning in warnings:
                 _warn(warning)
             protected = True
-            rule = routing_rule(zone)
-            if live and not sealed and not any(warning.startswith(UNPROTECTED) for warning in warnings):
+            sandboxed = not any(warning.startswith(UNPROTECTED) for warning in warnings)
+            start_closed = closed(pin["url"] if pin else url)
+            rule = routing_rule(zone, closed=start_closed)
+            if live and not sealed and sandboxed:
                 # Sandboxed now, beside the Runtime that just answered: the agent token read before this start could
                 # reach the model, so the Runtime replaces it. Every such start asks, so the last replacement is one
                 # asked from inside a sandbox. A load again in a process whose replacement succeeded asks no more: a
@@ -228,20 +238,20 @@ def register(ctx):
                 # With Wisp down, the cache alone: the endpoint is not asked.
                 now = load_zone(None if why else url, credential(), ZONE_CACHE, SESSION_TIMEOUT)
                 if now is None:
-                    return down_rule(None, why or not_answering()) if url else ""
-                return down_rule(now, why) if why else routing_rule(now)
+                    return down_rule(None, why or not_answering(), closed(url)) if url else ""
+                return down_rule(now, why, closed(url)) if why else routing_rule(now, closed=closed(url))
             except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, as at a load
                 logger.warning("Wisp: no routing rule, the zone is malformed: %r", exc)
                 return ""
         if not rule:
-            return down_rule(None, why) if why else rule
+            return down_rule(None, why, start_closed) if why else rule
         try:
             # The Connectors as of now: `wisp connectors auth` while Hermes runs needs no restart.
             url = pin["url"] if pin else ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
-            return session_rule(zone, url, credential(), ZONE_CACHE, why)
+            return session_rule(zone, url, credential(), ZONE_CACHE, why, start_closed)
         except Exception as exc:  # noqa: BLE001 — the start's rule then, one that raises Hermes skips
             logger.warning("Wisp: could not read the Connectors as of now: %r", exc)
-            return down_rule(zone, why) if why else rule
+            return down_rule(zone, why, start_closed) if why else rule
 
     ctx.register_system_prompt_section("wisp-routing", section)
     # Built here, not per call: a hook that raises blocks every tool call (Hermes fails closed).

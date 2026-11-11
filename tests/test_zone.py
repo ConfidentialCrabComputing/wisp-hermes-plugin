@@ -378,6 +378,21 @@ print(json.dumps([before, told()[0]]))"""))
                 self.assertIn("Hand these tasks to the `ask_wisp` tool", after)
                 self.assertIn("gmail", after)
 
+    def test_an_unpinned_loopback_wisp_back_since_the_load_is_not_called_out_of_reach(self):
+        # The start had no zone to sandbox Hermes from.
+        before, after = self.back_later("127.0.0.1")
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", after)
+        self.assertIn("/home/u/bank", after)
+        self.assertIn("this Hermes is not sandboxed from them", after)
+        for rule in (before, after):
+            self.assertNotIn("you cannot reach them", rule)
+
+    def test_a_wisp_on_another_machine_back_since_the_load_is_out_of_reach(self):
+        _, after = self.back_later("0.0.0.0")
+
+        self.assertIn("you cannot reach them", after)
+
     def test_a_zone_of_a_wrong_shape_after_a_load_with_none_leaves_the_section_blank(self):
         _, after = self.back_later("127.0.0.1", {"privateFolders": [{"name": "bank"}]})
 
