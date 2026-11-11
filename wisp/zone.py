@@ -37,12 +37,12 @@ def _cache(zone, cache):
         logger.warning("Wisp: could not cache the zone at %s: %s", cache, exc)
 
 
-def load_zone(url, credential, cache):
+def load_zone(url, credential, cache, timeout=5.0):
     """With no pin: the zone from the endpoint at `url`, written to `cache` as it came, as it may name another
     machine's folders; the cached one when the endpoint cannot answer; None when there is neither."""
     if url and credential:
         try:
-            zone = call_tool(url, credential, "wisp_zone")["structuredContent"]
+            zone = call_tool(url, credential, "wisp_zone", timeout=timeout)["structuredContent"]
             _cache(zone, cache)
             return zone
         except (OSError, McpError, ValueError, KeyError) as exc:

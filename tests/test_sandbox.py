@@ -395,6 +395,18 @@ except OSError:
 
         self.assertIn(UNPROTECTED, self.python("load_plugin()").stderr)
 
+    def test_a_zone_it_cannot_read_from_another_machine_is_a_connection_problem_not_unprotected(self):
+        # Connected over https to an endpoint that does not answer, with no zone cached: no sandbox here by design.
+        (self.home / "config.yaml").write_text(json.dumps(
+            {"plugins": {"enabled": ["wisp"]}, "mcp_servers": {"wisp": {"url": "https://wisp.invalid/mcp"}}}))
+        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
+        self.zone = None
+
+        stderr = self.python("load_plugin()").stderr
+
+        self.assertNotIn(UNPROTECTED, stderr)
+        self.assertIn("Wisp is not answering at https://wisp.invalid/mcp", stderr)
+
     @sandboxed
     def test_sandboxed_it_does_not_warn(self):
         self.assertNotIn(UNPROTECTED, self.python("load_plugin()").stderr)

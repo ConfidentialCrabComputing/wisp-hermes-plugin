@@ -10,10 +10,10 @@ from pathlib import Path
 
 from . import commands, connect
 from .hook import make_hook
-from .mcp_client import refuses
+from .mcp_client import loopback, refuses
 from .sandbox import UNPROTECTED, protect
 from .zone import (PIN, ZONE_CACHE, load_pin, load_zone, not_answering, not_answering_rule, not_connected,
-                   not_connected_rule, pinned_zone, routing_rule, session_rule)
+                   not_connected_rule, pinned_zone, SESSION_TIMEOUT, routing_rule, session_rule)
 
 logger = logging.getLogger(__name__)
 # The Hermes MCP servers `wisp integrate hermes` switched off because Wisp holds them now: written from
@@ -120,6 +120,7 @@ def register(ctx):
     zone = pin = None
     rule = ""
     protected = False
+    unread = None  # Wisp on another machine whose zone the start could not read: its URL
     try:
         pin = load_pin(PIN)
         if pin is not None:
@@ -130,7 +131,12 @@ def register(ctx):
             url = ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
             zone = load_zone(url, credential(), ZONE_CACHE)
             if zone is None and url:
-                _warn(f"{UNPROTECTED}: Wisp's zone could not be read, so Hermes is not sandboxed")
+                # Wisp on another machine is never sandboxed from here, so a zone it cannot read is only Wisp down.
+                if loopback(url):
+                    _warn(f"{UNPROTECTED}: Wisp's zone could not be read, so Hermes is not sandboxed")
+                else:
+                    unread = url
+                    logger.warning("Wisp is not answering at %s", url)
         if zone is not None:
             # After the zone is cached: the sandbox denies writes beside the plugin.
             # On Linux, sandboxed, the process is re-exec'd under bubblewrap here, through the pinned `wisp`.
@@ -150,6 +156,9 @@ def register(ctx):
             return not_connected_rule(pinned)
         up = answering()
         if not rule:
+            # Asked again for each session, so a Wisp back since the start is not called down.
+            if up and unread and load_zone(unread, credential(), ZONE_CACHE, SESSION_TIMEOUT) is None:
+                up = False
             return rule if up else not_answering_rule(None)
         try:
             # The Connectors as of now: `wisp connectors auth` while Hermes runs needs no restart.
