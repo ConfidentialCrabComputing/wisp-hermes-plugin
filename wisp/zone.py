@@ -179,17 +179,22 @@ def rejected(pinned):
             f"{_repair(pinned)} again in a terminal, then restart Hermes; do not do the task another way.")
 
 
-def down_rule(zone, down):
+def _reach(closed):
+    """What the rule says of Wisp's files: out of reach only when this process is `closed` off from them."""
+    return "you cannot reach them" if closed else "these are Wisp's to handle; this Hermes is not sandboxed from them"
+
+
+def down_rule(zone, down, closed):
     """The routing rule while Wisp does not answer, `down` saying why: what is Wisp's, from `zone` when there is one."""
     if zone:
-        return routing_rule(zone, down)
+        return routing_rule(zone, down, closed=closed)
     return f"""# Wisp
 Wisp is the user's private agent: it holds the keys to the user's sensitive accounts and reads their private
-files, and you cannot reach them. {down}
+files, and {_reach(closed)}. {down}
 Say so whenever the user asks for Wisp or for anything Wisp does."""
 
 
-def session_rule(zone, url, credential, cache, down=None):
+def session_rule(zone, url, credential, cache, down, closed):
     """The routing rule for a session starting now: `zone`'s folders as of Hermes's start (the sandbox closes a folder
     only at a start, so a rule naming one added since would call closed a folder Hermes can still open) with the
     Connectors the endpoint names now, or the cache's when it does not answer, or the start's. With Wisp `down`, the
@@ -207,22 +212,24 @@ def session_rule(zone, url, credential, cache, down=None):
         try:
             answer = read()
             return routing_rule({**folders, "services": answer.get("services") or [],
-                                 **({"connectors": answer["connectors"]} if "connectors" in answer else {})}, down)
+                                 **({"connectors": answer["connectors"]} if "connectors" in answer else {})}, down,
+                                closed=closed)
         except Exception as exc:  # noqa: BLE001 — anything read here is data; the start's rule stands in
             logger.warning("Wisp: no Connectors %s (%r)", read.__name__, exc)
-    return routing_rule(zone, down)
+    return routing_rule(zone, down, closed=closed)
 
 
-def routing_rule(zone, down=None):
+def routing_rule(zone, down=None, *, closed):
     """The system prompt section that sends Wisp's tasks to `ask_wisp` (with Wisp `down`: names them as Wisp's and
-    says `down`, why Wisp does not answer), within Hermes's section cap: what does not fit is counted, not listed."""
+    says `down`, why Wisp does not answer), within Hermes's section cap: what does not fit is counted, not listed.
+    `closed`: this process is closed off from Wisp's files (sandboxed, or Wisp is on another machine)."""
     send = ("""Hand these tasks to the `ask_wisp` tool instead of doing them
 yourself, and relay Wisp's answer; continue a Wisp conversation by passing its `conversation` id back to
 `ask_wisp`:""" if down is None else f"""{down}
 These tasks are Wisp's:""")
     head = f"""# Wisp
 Wisp is the user's private agent. It holds the keys to the user's sensitive accounts and reads their
-private files; you cannot reach them. {send}
+private files; {_reach(closed)}. {send}
 - anything that reads or changes a file in Wisp's data directory {_inert(zone["dataDir"])} or under its
 Desk root {_inert(zone["deskRoot"])};"""
     if "connectors" in zone:
