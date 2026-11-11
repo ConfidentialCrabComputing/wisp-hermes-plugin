@@ -318,6 +318,15 @@ Desk root /home/u/.wisp/desks;
         self.assertIn("/home/u/bank", rule)
         self.assertIn("Wisp is not answering", refusal)
 
+    def test_wisp_on_another_machine_not_answering_a_new_session_is_told_so(self):
+        # Over https, no zone cached, and the endpoint does not answer.
+        self.config["mcp_servers"]["wisp"]["url"] = "https://wisp.invalid/mcp"
+
+        rule = json.loads(self.hermes("sections"))["wisp-routing"]
+
+        self.assertIn("Wisp is not answering", rule)
+        self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+
     def asked_wisp(self, **env):
         """What the hook answers an `ask_wisp` call, as an open session whose tool list still has it makes one."""
         call = [["mcp__wisp__ask_wisp", {"task": "How many unread emails do I have?"}]]

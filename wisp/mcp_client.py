@@ -30,14 +30,23 @@ class McpError(Exception):
     """The endpoint answered, but not with the tool's result."""
 
 
+def loopback(url):
+    """Whether `url` names this machine's loopback; a malformed one does not."""
+    host = urllib.parse.urlsplit(url or "").hostname
+    try:
+        return host == "localhost" or ipaddress.ip_address(host or "").is_loopback
+    except ValueError:
+        return False
+
+
 def refuses(url, timeout=1.0):
     """Whether nothing listens on a loopback `url` (a Runtime stopped or restarting, or an `ssh -L` tunnel down).
     A slow endpoint is not refusing, and another host's is never probed: Hermes may reach it through a proxy this
     would not take, and Hermes's own client tells of it."""
-    parts = urllib.parse.urlsplit(url or "")
+    if not loopback(url):
+        return False
+    parts = urllib.parse.urlsplit(url)
     try:
-        if parts.hostname != "localhost" and not ipaddress.ip_address(parts.hostname or "").is_loopback:
-            return False
         port = parts.port or (443 if parts.scheme == "https" else 80)
     except ValueError:
         return False
