@@ -352,6 +352,52 @@ print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARG
         self.assertIn(UNPROTECTED, stderr)
         self.assertIn(str(self.data_dir), stderr)
 
+    def protect_twice(self, second_zone, second_plugin):
+        """`protect`'s warnings at a second call in one process, the first with this zone, and its stderr; as a gateway
+        that serves two profiles loads the plugin once for each."""
+        done = subprocess.run([sys.executable, "-c", f"""
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("sandbox", {str(self.plugin / "sandbox.py")!r})
+sandbox = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sandbox)
+assert sandbox.protect({self.zone!r}, {str(self.plugin)!r}, {str(self.home)!r}) == []
+print(json.dumps(sandbox.protect({second_zone!r}, {str(second_plugin)!r}, {str(self.home)!r})))"""],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout), done.stderr
+
+    @macos
+    def test_a_second_protect_in_a_sandboxed_process_warns_only_of_what_it_can_reach(self):
+        taxes = self.tmp / "taxes"
+        taxes.mkdir()
+        (taxes / "2025.pdf").write_text("taxes")
+        other_plugin = self.tmp / "work" / "plugins" / "wisp"
+        other_plugin.mkdir(parents=True)
+
+        self.assertEqual(self.protect_twice(self.zone, self.plugin), ([], ""))
+        added = {**self.zone, "privateFolders": [*self.zone["privateFolders"], {"path": str(taxes)}]}
+        warnings, _ = self.protect_twice(added, self.plugin)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(UNPROTECTED, warnings[0])
+        self.assertIn(str(taxes), warnings[0])
+        key = self.tmp / "master.key"
+        key.write_text("root key")
+        warnings, _ = self.protect_twice({**self.zone, "secretFiles": [str(key)]}, self.plugin)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(str(key), warnings[0])
+        warnings, stderr = self.protect_twice(self.zone, other_plugin)
+        self.assertEqual(stderr, "")
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(UNPROTECTED, warnings[0])
+        self.assertIn(str(other_plugin), warnings[0])
+        # Its folder read-only, a file in it still takes writes.
+        (other_plugin / "__init__.py").write_text("")
+        other_plugin.chmod(0o555)
+        self.addCleanup(other_plugin.chmod, 0o755)
+        warnings, _ = self.protect_twice(self.zone, other_plugin)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(str(other_plugin), warnings[0])
+
     @macos
     def test_a_failed_sandbox_start_leaves_chromes_own_sandbox_on(self):
         for before in ([], ["AGENT_BROWSER_ARGS=--lang=de"]):

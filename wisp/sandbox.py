@@ -20,6 +20,7 @@ UNPROTECTED = "Wisp's zone is unprotected"
 SERVICE_COMMAND = "Hermes manages its gateway service unsandboxed"
 # The `hermes gateway` commands that only manage the service: launchd refuses `launchctl bootstrap` from a sandboxed process.
 SERVICE_VERBS = ("start", "stop", "restart", "install", "uninstall")
+SANDBOXED_ALREADY = "this process runs in a sandbox already, which cannot be tightened"
 LEGACY_TIOCSTI = "/proc/sys/dev/tty/legacy_tiocsti"
 BWRAP = "/usr/bin/bwrap"
 EXTERNAL_SUPERVISOR = "--external-supervisor"
@@ -332,7 +333,13 @@ def apply(denied, plugin_dir, wisp):
             if _sandboxed([], plugin_dir):
                 _without_chromes_sandbox()
             return problem
-        sandbox_init = ctypes.CDLL(None).sandbox_init
+        libc = ctypes.CDLL(None)
+        # A second `sandbox_init` with another profile fails, and says so on stderr: inside one, only what reaches the zone
+        # (`protect` checks) is worth a line.
+        libc.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        if libc.sandbox_check(os.getpid(), None, 0) == 1:
+            return SANDBOXED_ALREADY
+        sandbox_init = libc.sandbox_init
         sandbox_init.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_char_p)]
         error = ctypes.c_char_p()
         if sandbox_init(profile(denied, plugin_dir).encode(), 0, ctypes.byref(error)) != 0:
@@ -433,8 +440,11 @@ def _reads(folder, denied):
     """Whether this process sees what is in `folder`: it opens and has an entry that is neither denied itself nor
     only the way to a denied folder deeper inside (a tmpfs over `folder` holds the mount point of each denied
     folder inside it, and each folder on the way there). ponytail: an empty folder reads as unseen, there being
-    nothing in it to read yet."""
+    nothing in it to read yet; a secret file likewise, so Linux's `/dev/null` over it too."""
     try:
+        if not os.path.isdir(folder):
+            with open(folder, "rb") as file:
+                return file.read(1) != b""
         with os.scandir(folder) as entries:
             return any(entry.path not in denied
                        and (not any(_within(path, entry.path) for path in denied) or _reads(entry.path, denied))
@@ -527,10 +537,16 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
         else:
             failed = again
     open_folders = [folder for folder in denied if folder not in left and _reads(folder, denied)]
-    if open_folders:
-        warnings.append(f"{UNPROTECTED}: Hermes can read {', '.join(open_folders)}"
-                        + (f" ({failed})" if failed else ""))
-    elif failed:
+    # macOS, in a sandbox already (another load in this process, or a sandboxed parent): what this process can reach is the
+    # warning, not the `sandbox_init` that could not tighten it. ponytail: a folder empty or not there yet reads as closed.
+    # The folder and each file in it: a folder's mode alone leaves its files' own.
+    writable = failed == SANDBOXED_ALREADY and any(
+        os.access(path, os.W_OK) for path in [plugin, *(os.path.join(top, name) for top, dirs, files in os.walk(plugin)
+                                                        for name in [*dirs, *files])])
+    if open_folders or writable:
+        reached = ([f"read {', '.join(open_folders)}"] if open_folders else []) + ([f"write {plugin}"] if writable else [])
+        warnings.append(f"{UNPROTECTED}: Hermes can {' and '.join(reached)}" + (f" ({failed})" if failed else ""))
+    elif failed and failed != SANDBOXED_ALREADY:
         warnings.append(f"{UNPROTECTED}: {failed}")
     # `failed` under a running sandbox: a folder was left out of it, and all this still holds for the rest.
     if sys.platform == "linux" and (not failed or _sandboxed([], plugin)):
