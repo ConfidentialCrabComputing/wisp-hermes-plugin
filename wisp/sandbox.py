@@ -195,7 +195,7 @@ def _inherited_fds():
             return os.get_inheritable(fd) and not stat.S_ISDIR(os.fstat(fd).st_mode)
         except OSError:  # The listing's own fd, closed by now.
             return False
-    return [fd for fd in map(int, os.listdir("/proc/self/fd")) if fd > 2 and passes(fd)]
+    return [fd for fd in map(int, os.listdir("/dev/fd")) if fd > 2 and passes(fd)]
 
 
 def _folders(denied, plugin_dir):
