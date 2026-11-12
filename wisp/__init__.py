@@ -12,7 +12,7 @@ from pathlib import Path
 from . import commands, connect
 from .hook import make_hook
 from .mcp_client import call_tool, loopback, refuses
-from .sandbox import UNPROTECTED, protect
+from .sandbox import SERVICE_COMMAND, UNPROTECTED, protect
 from .zone import (PIN, ZONE_CACHE, down_rule, load_pin, load_zone, not_answering, not_connected, not_connected_rule,
                    pinned_zone, rejected, routing_rule, SESSION_TIMEOUT, session_rule)
 
@@ -179,7 +179,7 @@ def register(ctx):
     live = False  # the pinned endpoint answered `wisp_zone` at this start, not the cache
     rule = ""
     protected = False
-    sandboxed = False  # `protect` ran at this start with no "unprotected" warning; no running process changes it
+    sandboxed = False  # `protect` sandboxed this start, saying nothing "unprotected"; no running process changes it
     start_closed = False  # what the start's rule says of Wisp's files; with no rule, nothing closed them
 
     def closed(url):
@@ -211,7 +211,7 @@ def register(ctx):
             for warning in warnings:
                 _warn(warning)
             protected = True
-            sandboxed = not any(warning.startswith(UNPROTECTED) for warning in warnings)
+            sandboxed = not any(warning.startswith((UNPROTECTED, SERVICE_COMMAND)) for warning in warnings)
             start_closed = closed(pin["url"] if pin else url)
             rule = routing_rule(zone, closed=start_closed)
             if live and not sealed and sandboxed:

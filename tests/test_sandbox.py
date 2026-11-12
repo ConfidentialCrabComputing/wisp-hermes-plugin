@@ -365,6 +365,33 @@ print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARG
                 self.assertIn(UNPROTECTED, done.stderr)
                 self.assertEqual(done.stdout.strip(), "--lang=de" if before else "None")
 
+    def probe(self, *argv, **env):
+        """What the fake `hermes` with these arguments says of reading a zone file, line by line."""
+        done = self.hermes(*argv, wrap=("env", f"FAKE_HERMES_PROBE={self.bank / 'secret.txt'}",
+                                        *(f"{name}={value}" for name, value in env.items())))
+        return done.stdout.split(), done.stderr
+
+    @macos
+    def test_a_command_that_manages_the_gateway_service_runs_unsandboxed_and_warns_nothing(self):
+        # launchd refuses `launchctl bootstrap` from any sandboxed process.
+        for argv in (["gateway", "start"], ["gateway", "stop"], ["gateway", "restart", "--all"], ["gateway", "install"],
+                     ["gateway", "uninstall"], ["-p", "coder", "gateway", "restart"]):
+            with self.subTest(argv=argv):
+                if argv[0] == "-p":
+                    shutil.copytree(self.home, self.home / "profiles" / "coder", ignore=shutil.ignore_patterns("profiles"))
+                    (self.home / "profiles" / "coder" / "plugins" / "wisp" / "zone.json").write_text(json.dumps(self.zone))
+                said, stderr = self.probe(*argv)
+
+                self.assertEqual(said, ["service:", "read"])
+                self.assertNotIn(UNPROTECTED, stderr)
+
+    @sandboxed
+    def test_a_gateway_run_and_the_gateway_a_service_command_runs_in_its_own_process_are_sandboxed(self):
+        self.assertEqual(self.probe("gateway", "run")[0], ["gateway:", "refused"])
+        said, stderr = self.probe("gateway", "restart", "--all", FAKE_HERMES_NO_SERVICE="1")
+        self.assertEqual(said[-2:], ["gateway:", "refused"])
+        self.assertNotIn(UNPROTECTED, stderr)
+
     @linux
     @sandboxed
     def test_the_mark_a_model_could_leave_in_hermess_env_file_does_not_stop_the_sandbox(self):
@@ -1181,6 +1208,14 @@ class Pin(HermesHome):
 
         self.assertIn(UNPROTECTED, done.stderr)
         self.assertEqual(self.called, ["wisp_zone"])
+
+    @macos
+    def test_a_command_that_manages_the_gateway_service_never_asks_to_replace_the_token(self):
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+
+        done = self.hermes("gateway", "restart", "--all")
+
+        self.assertEqual(self.called, ["wisp_zone"], done.stderr)
 
     @sandboxed
     def test_a_start_without_a_pin_never_asks_to_replace_the_token(self):
