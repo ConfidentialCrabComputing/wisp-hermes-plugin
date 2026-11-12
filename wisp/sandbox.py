@@ -319,6 +319,12 @@ def _without_chromes_sandbox():
     args = os.environ.get("AGENT_BROWSER_ARGS", "")
     if "--no-sandbox" not in (arg.strip() for arg in args.split(",")):
         os.environ["AGENT_BROWSER_ARGS"] = f"{args},--no-sandbox" if args.strip() else "--no-sandbox"
+    # A Hermes with its own launcher reads no `AGENT_BROWSER_ARGS`: it adds `--no-sandbox` only where it asks this.
+    try:
+        import tools.browser_launcher as launcher
+    except Exception:  # an older Hermes, or a launcher that fails to load: the line above is all there is
+        return
+    launcher.needs_chromium_sandbox_bypass = lambda: True
 
 
 def apply(denied, plugin_dir, wisp):

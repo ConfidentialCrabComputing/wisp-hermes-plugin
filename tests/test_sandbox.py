@@ -333,9 +333,10 @@ for path in ({str(self.plugin / "__init__.py")!r}, {str(self.plugin / "zone.json
                 done = self.python("""
 import os
 load_plugin()
-print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARGS", *([] if before is None else [f"AGENT_BROWSER_ARGS={before}"])))
+from tools import browser_launcher
+print(os.environ.get("AGENT_BROWSER_ARGS"), browser_launcher.needs_chromium_sandbox_bypass())""", ("env", "-u", "AGENT_BROWSER_ARGS", *([] if before is None else [f"AGENT_BROWSER_ARGS={before}"])))
 
-                self.assertEqual(done.stdout.strip(), after)
+                self.assertEqual(done.stdout.split(), [after, "True"])
 
     def test_wisp_on_another_machine_applies_no_sandbox_and_warns_nothing(self):
         shutil.rmtree(self.data_dir)
@@ -405,11 +406,12 @@ print(json.dumps(sandbox.protect({second_zone!r}, {str(second_plugin)!r}, {str(s
                 done = self.python("""
 import os
 load_plugin()
-print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARGS", *before,
+from tools import browser_launcher
+print(os.environ.get("AGENT_BROWSER_ARGS"), browser_launcher.needs_chromium_sandbox_bypass())""", ("env", "-u", "AGENT_BROWSER_ARGS", *before,
                  "sandbox-exec", "-p", "(version 1)(allow default)"))
 
                 self.assertIn(UNPROTECTED, done.stderr)
-                self.assertEqual(done.stdout.strip(), "--lang=de" if before else "None")
+                self.assertEqual(done.stdout.split(), ["--lang=de" if before else "None", "False"])
 
     def probe(self, *argv, **env):
         """What the fake `hermes` with these arguments says of reading a zone file, line by line."""

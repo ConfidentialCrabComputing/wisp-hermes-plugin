@@ -193,7 +193,8 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
   start is sandboxed at its own start, and one a `restart` runs in its own process (no service installed) is sandboxed
   before it starts.
 - Under Wisp's sandbox, Hermes's browser runs without Chrome's own sandbox: Chrome's cannot start inside Wisp's, so the
-  plugin adds `--no-sandbox` to `AGENT_BROWSER_ARGS`. A Hermes that runs without Wisp's sandbox keeps Chrome's.
+  plugin has Hermes's browser launcher start it with `--no-sandbox` (an older Hermes: added to `AGENT_BROWSER_ARGS`). A
+  Hermes that runs without Wisp's sandbox keeps Chrome's.
 - On Linux, `sudo` and other setuid programs do not work inside the sandboxed Hermes: bubblewrap always sets
   `no_new_privs`, as without it any setuid program inside would regain root and undo the sandbox. Run a command that
   needs root outside Hermes.
