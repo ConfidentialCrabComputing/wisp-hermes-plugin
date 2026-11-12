@@ -50,7 +50,8 @@ Then:
 
 - A Confirmation Wisp raises shows in Hermes's own approval panel, and is denied when nobody answers within Hermes's
   5 minutes (`approvals.timeout`). One "Allow once" covers that tool for the rest of the task, except where Wisp's own
-  rules ask every time (a Judge escalation, an "Always ask" Rule).
+  rules ask every time (a Judge escalation, an "Always ask" Rule) and except a command or a file write, which asks each
+  time, since its name says nothing of what the next call does.
 - A Confirmation of `/wisp` is asked in the chat itself (Telegram, Slack, Discord, the TUI, the Desktop), and is denied
   when nobody answers within Hermes's clarify timeout, 90 seconds by default. `agent.clarify_timeout` in Hermes's config
   widens it, for every clarifying question Hermes asks. The task goes on without that tool, and can be asked again.
