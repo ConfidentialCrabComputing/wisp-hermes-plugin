@@ -378,10 +378,10 @@ def _in_its_gateway():
     return False
 
 
-def _sandbox_its_gateway(denied, plugin_dir, wisp):
+def _sandbox_its_gateway(denied, plugin_dir, wisp, sandboxed):
     """Has the gateway a service command runs in its own process (Hermes's fallback with no service installed) sandboxed
-    before it starts; False when this Hermes has no `run_gateway` to wrap. Every other gateway is a process of its own,
-    which this plugin sandboxes at its start."""
+    before it starts, calling `sandboxed()` once it is; False when this Hermes has no `run_gateway` to wrap. Every other
+    gateway is a process of its own, which this plugin sandboxes at its start."""
     try:
         from hermes_cli import gateway
         run = gateway.run_gateway
@@ -392,6 +392,8 @@ def _sandbox_its_gateway(denied, plugin_dir, wisp):
         if failed := apply(denied, plugin_dir, wisp):
             logging.getLogger(__name__).warning("%s: %s", UNPROTECTED, failed)
             print(f"{UNPROTECTED}: {failed}", file=sys.stderr, flush=True)
+        else:
+            sandboxed()
         return run(*args, **kwargs)
 
     gateway.run_gateway = sandboxed_run
@@ -508,11 +510,12 @@ def tiocsti_warning(sysctl=LEGACY_TIOCSTI):
     return f"{typing}; set `sysctl dev.tty.legacy_tiocsti=0` (kernel 6.2+)" if allowed else None
 
 
-def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
+def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None, sandboxed_later=lambda: None):
     """Sandboxes this Hermes process away from `zone` when Wisp is local (its data directory is on this
     machine; for a zone `wisp integrate hermes` pinned, any of its folders), then checks from inside that
     the zone is out of reach. `pinned` is that pin. When the whole list fails with a pin, the pinned folders alone get one
-    more try. The warnings to show in Hermes: a pinned zone left unsandboxed always warns."""
+    more try. The warnings to show in Hermes: a pinned zone left unsandboxed always warns. A service command's warning
+    leaves the sandbox to the gateway it may run in this process: `sandboxed_later()` is called once that is sandboxed."""
     zone_folders = _zone_folders(zone)
     if not (any(map(_here, zone_folders)) if pinned else _here(zone["dataDir"])):
         return [f"{UNPROTECTED}: none of the folders wisp integrate hermes pinned is on this machine"] if pinned else []
@@ -539,7 +542,7 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
         else:
             denied.append(folder)
     if (sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and not _in_its_gateway()
-            and _sandbox_its_gateway(denied, plugin, wisp)):
+            and _sandbox_its_gateway(denied, plugin, wisp, sandboxed_later)):
         return [*warnings, f"{SERVICE_COMMAND}: launchd refuses to load it from a sandboxed process"]
     kept = set(map(os.path.realpath, _zone_folders(pinned or zone)))
     held = [folder for folder in denied if folder in kept]

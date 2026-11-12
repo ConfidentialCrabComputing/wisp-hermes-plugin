@@ -1273,6 +1273,24 @@ class Pin(HermesHome):
 
         self.assertEqual(self.called, ["wisp_zone"], done.stderr)
 
+    @macos
+    def test_the_gateway_a_service_command_runs_in_its_own_process_has_the_token_replaced_and_is_told_it_is_closed(self):
+        # Hermes's fallback with no service installed: the gateway runs in the service command's process, sandboxed.
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+
+        done = self.python("""
+import sys
+sys.argv[1:] = ["gateway", "restart", "--all"]
+ctx = load_plugin()
+from hermes_cli import gateway
+gateway.run_gateway(replace=True)
+print(section(ctx, "wisp-routing", "s1"))""", wrap=("env", f"FAKE_HERMES_PROBE={self.bank / 'secret.txt'}"))
+
+        self.assertIn("gateway: refused", done.stdout)
+        self.assertEqual(self.called[:2], ["wisp_zone", "wisp_sealed"], done.stderr)
+        self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+        self.assertIn("you cannot reach them", done.stdout)
+
     @sandboxed
     def test_a_start_without_a_pin_never_asks_to_replace_the_token(self):
         self.pin = None

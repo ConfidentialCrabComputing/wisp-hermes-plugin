@@ -179,13 +179,41 @@ def register(ctx):
     live = False  # the pinned endpoint answered `wisp_zone` at this start, not the cache
     rule = ""
     protected = False
-    sandboxed = False  # `protect` sandboxed this start, saying nothing "unprotected"; no running process changes it
+    sandboxed = False  # `protect` sandboxed this start, saying nothing "unprotected", or the gateway a service command runs
     start_closed = False  # what the start's rule says of Wisp's files; with no rule, nothing closed them
 
     def closed(url):
         """Whether this process is closed off from Wisp's files: sandboxed at its start, or Wisp at `url` on another
         machine."""
         return sandboxed or not loopback(url)
+
+    def seal():
+        """Sandboxed now, beside the Runtime that answered at this start: the agent token read before could reach the
+        model, so the Runtime replaces it. Every such start asks, so the last replacement is one asked from inside a
+        sandbox. A load again in a process whose replacement succeeded asks no more: a client holding the token it was
+        just given keeps it. One that never had it replaced (its loads ran on the cache, unsandboxed, or the ask failed)
+        asks. Bubblewrap's child is a new process, so it asks."""
+        nonlocal sealed
+        if not live or sealed:
+            return
+        try:
+            call_tool(pin["url"], credential(), "wisp_sealed")
+            sealed = True
+        except Exception as exc:  # noqa: BLE001 — the token stays as it was; the start goes on
+            logger.warning("Wisp: could not have the Runtime replace its agent token: %r", exc)
+        if revival is not None:
+            revival.sealed = sealed
+
+    def gateway_sandboxed():
+        """The gateway a service command runs in this process is sandboxed now, before it starts: its sessions are told
+        Wisp's files are out of reach, and the Runtime replaces the token."""
+        nonlocal sandboxed, start_closed, rule
+        sandboxed = start_closed = True
+        try:
+            rule = routing_rule(zone, closed=True)
+            seal()
+        except Exception as exc:  # noqa: BLE001 — never a gateway that fails to start
+            logger.warning("Wisp: could not take the gateway's sandbox in: %r", exc)
 
     try:
         pin = load_pin(PIN)
@@ -207,24 +235,15 @@ def register(ctx):
             # After the zone is cached: the sandbox denies writes beside the plugin.
             # On Linux, sandboxed, the process is re-exec'd under bubblewrap here, through the pinned `wisp`.
             warnings = protect(zone, Path(__file__).resolve().parent, get_config_path().parent,
-                               pinned=pin, wisp=(pin or {}).get("wisp"))
+                               pinned=pin, wisp=(pin or {}).get("wisp"), sandboxed_later=gateway_sandboxed)
             for warning in warnings:
                 _warn(warning)
             protected = True
             sandboxed = not any(warning.startswith((UNPROTECTED, SERVICE_COMMAND)) for warning in warnings)
             start_closed = closed(pin["url"] if pin else url)
             rule = routing_rule(zone, closed=start_closed)
-            if live and not sealed and sandboxed:
-                # Sandboxed now, beside the Runtime that just answered: the agent token read before this start could
-                # reach the model, so the Runtime replaces it. Every such start asks, so the last replacement is one
-                # asked from inside a sandbox. A load again in a process whose replacement succeeded asks no more: a
-                # client holding the token it was just given keeps it. One that never had it replaced (its loads ran
-                # on the cache, unsandboxed, or the ask failed) asks. Bubblewrap's child is a new process, so it asks.
-                try:
-                    call_tool(pin["url"], credential(), "wisp_sealed")
-                    sealed = True
-                except Exception as exc:  # noqa: BLE001 — the token stays as it was; the start goes on
-                    logger.warning("Wisp: could not have the Runtime replace its agent token: %r", exc)
+            if sandboxed:
+                seal()
     except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, never a failed load
         logger.warning("Wisp: no routing rule, the zone is malformed: %r", exc)
         if not protected and pinned:
