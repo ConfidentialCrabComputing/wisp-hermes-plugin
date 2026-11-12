@@ -179,6 +179,10 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
 - On one machine, the Runtime replaces its own agent token each time a sandboxed Hermes process starts, so a token
   Hermes's model saw before the sandbox stops working. A Hermes process still running unsandboxed (a CLI open since
   before `wisp integrate hermes`) can read the new token as well, until it stops.
+- On macOS, `hermes gateway start`, `stop`, `restart`, `install` and `uninstall` run without Wisp's sandbox: launchd
+  refuses to load the gateway's service from a sandboxed process. They run no model and no tool; the gateway they
+  start is sandboxed at its own start, and one a `restart` runs in its own process (no service installed) is sandboxed
+  before it starts.
 - Under Wisp's sandbox, Hermes's browser runs without Chrome's own sandbox: Chrome's cannot start inside Wisp's, so the
   plugin adds `--no-sandbox` to `AGENT_BROWSER_ARGS`. A Hermes that runs without Wisp's sandbox keeps Chrome's.
 - On Linux, `sudo` and other setuid programs do not work inside the sandboxed Hermes: bubblewrap always sets

@@ -26,7 +26,6 @@ import importlib.util
 import json
 import os
 import shutil
-import signal
 import sys
 import time
 from pathlib import Path
@@ -353,9 +352,19 @@ def main(argv):
         ctx = load_plugin()
         print(json.dumps([pre_tool_call(ctx, name, args) for name, args in json.load(sys.stdin)]))
     elif argv[:2] == ["gateway", "run"]:
-        # A gateway, as far as the sandbox is concerned: the plugin loaded, then waiting for its signals.
+        # A gateway, as far as the sandbox is concerned: the plugin loaded, then the gateway in this process.
         load_plugin()
-        signal.pause()
+        from hermes_cli.gateway import run_gateway
+        run_gateway()
+    elif argv[:1] == ["gateway"] and argv[1:2] in (["start"], ["stop"], ["restart"], ["install"], ["uninstall"]):
+        # As Hermes: the plugin loads (reading the gateway's config discovers plugins), then the service manager is
+        # asked; with no service installed (`FAKE_HERMES_NO_SERVICE`) `restart` runs the gateway in this process.
+        load_plugin()
+        from hermes_cli import gateway
+        if os.environ.get("FAKE_HERMES_PROBE"):
+            print(f"service: {gateway.probe()}")
+        if os.environ.get("FAKE_HERMES_NO_SERVICE") and argv[1] == "restart":
+            gateway.run_gateway(replace=True)
     elif argv[:1] == ["python"] and len(argv) == 2:
         # Not Hermes's: Python run in this process, which loads the plugin by calling `load_plugin()` and runs its
         # hooks with `pre_tool_call(ctx, tool_name, args)`.

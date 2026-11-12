@@ -17,6 +17,9 @@ import subprocess
 import sys
 
 UNPROTECTED = "Wisp's zone is unprotected"
+SERVICE_COMMAND = "Hermes manages its gateway service unsandboxed"
+# The `hermes gateway` commands that only manage the service: launchd refuses `launchctl bootstrap` from a sandboxed process.
+SERVICE_VERBS = ("start", "stop", "restart", "install", "uninstall")
 LEGACY_TIOCSTI = "/proc/sys/dev/tty/legacy_tiocsti"
 BWRAP = "/usr/bin/bwrap"
 EXTERNAL_SUPERVISOR = "--external-supervisor"
@@ -340,6 +343,34 @@ def apply(denied, plugin_dir, wisp):
     return None
 
 
+def _manages_the_service(argv):
+    """Whether Hermes's arguments `argv` are a `hermes gateway` command that only manages the service, a profile named
+    before it or not. Anything else before `gateway` keeps the sandbox."""
+    while argv[:1] in (["-p"], ["--profile"]):
+        argv = argv[2:]
+    return argv[:1] == ["gateway"] and argv[1:2] in ([verb] for verb in SERVICE_VERBS)
+
+
+def _sandbox_its_gateway(denied, plugin_dir, wisp):
+    """Has the gateway a service command runs in its own process (Hermes's fallback with no service installed) sandboxed
+    before it starts; False when this Hermes has no `run_gateway` to wrap. Every other gateway is a process of its own,
+    which this plugin sandboxes at its start."""
+    try:
+        from hermes_cli import gateway
+        run = gateway.run_gateway
+    except Exception:  # noqa: BLE001 — an older or rewritten Hermes: sandboxed now, as any other command
+        return False
+
+    def sandboxed_run(*args, **kwargs):
+        if failed := apply(denied, plugin_dir, wisp):
+            logging.getLogger(__name__).warning("%s: %s", UNPROTECTED, failed)
+            print(f"{UNPROTECTED}: {failed}", file=sys.stderr, flush=True)
+        return run(*args, **kwargs)
+
+    gateway.run_gateway = sandboxed_run
+    return True
+
+
 def _zone_folders(zone):
     """The zone's folders, then the Runtime's secret files: each denied as a path, which on macOS covers a file as it
     does a folder, and on Linux `wisp sandbox-exec` covers by what it finds there."""
@@ -474,6 +505,8 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
             warnings.append(f"{UNPROTECTED}: {folder} would take {root} from Hermes's start, so it is not sandboxed")
         else:
             denied.append(folder)
+    if sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and _sandbox_its_gateway(denied, plugin, wisp):
+        return [*warnings, f"{SERVICE_COMMAND}: launchd refuses to load it from a sandboxed process"]
     kept = set(map(os.path.realpath, _zone_folders(pinned or zone)))
     held = [folder for folder in denied if folder in kept]
     failed = apply(denied, plugin, wisp)
