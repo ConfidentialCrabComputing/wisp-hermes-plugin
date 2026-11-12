@@ -1291,6 +1291,24 @@ print(section(ctx, "wisp-routing", "s1"))""", wrap=("env", f"FAKE_HERMES_PROBE={
         self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
         self.assertIn("you cannot reach them", done.stdout)
 
+    @macos
+    def test_the_gateway_a_service_command_runs_with_a_folder_left_out_is_not_told_it_is_closed(self):
+        # A Private Folder holding Hermes's home is left out of the sandbox, as at any other start.
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank, self.tmp]))
+
+        done = self.python("""
+import sys
+sys.argv[1:] = ["gateway", "restart", "--all"]
+ctx = load_plugin()
+from hermes_cli import gateway
+gateway.run_gateway(replace=True)
+print(section(ctx, "wisp-routing", "s1"))""", wrap=("env", f"FAKE_HERMES_PROBE={self.bank / 'secret.txt'}"))
+
+        self.assertIn("gateway: refused", done.stdout)
+        self.assertNotIn("wisp_sealed", self.called, done.stderr)
+        self.assertIn("this Hermes is not sandboxed from them", done.stdout)
+        self.assertNotIn("you cannot reach them", done.stdout)
+
     @sandboxed
     def test_a_start_without_a_pin_never_asks_to_replace_the_token(self):
         self.pin = None

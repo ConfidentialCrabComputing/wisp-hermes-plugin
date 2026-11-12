@@ -392,7 +392,7 @@ def _sandbox_its_gateway(denied, plugin_dir, wisp, sandboxed):
         if failed := apply(denied, plugin_dir, wisp):
             logging.getLogger(__name__).warning("%s: %s", UNPROTECTED, failed)
             print(f"{UNPROTECTED}: {failed}", file=sys.stderr, flush=True)
-        else:
+        elif sandboxed:
             sandboxed()
         return run(*args, **kwargs)
 
@@ -542,7 +542,8 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None, sandboxed_lat
         else:
             denied.append(folder)
     if (sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and not _in_its_gateway()
-            and _sandbox_its_gateway(denied, plugin, wisp, sandboxed_later)):
+            # A folder left out above stays out of that gateway's sandbox too: it is not told it is closed.
+            and _sandbox_its_gateway(denied, plugin, wisp, None if warnings else sandboxed_later)):
         return [*warnings, f"{SERVICE_COMMAND}: launchd refuses to load it from a sandboxed process"]
     kept = set(map(os.path.realpath, _zone_folders(pinned or zone)))
     held = [folder for folder in denied if folder in kept]
