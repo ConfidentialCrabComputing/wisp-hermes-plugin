@@ -17,6 +17,7 @@ import subprocess
 import sys
 
 UNPROTECTED = "Wisp's zone is unprotected"
+SANDBOXED_ALREADY = "this process runs in a sandbox already, which cannot be tightened"
 LEGACY_TIOCSTI = "/proc/sys/dev/tty/legacy_tiocsti"
 BWRAP = "/usr/bin/bwrap"
 EXTERNAL_SUPERVISOR = "--external-supervisor"
@@ -329,7 +330,13 @@ def apply(denied, plugin_dir, wisp):
             if _sandboxed([], plugin_dir):
                 _without_chromes_sandbox()
             return problem
-        sandbox_init = ctypes.CDLL(None).sandbox_init
+        libc = ctypes.CDLL(None)
+        # A second `sandbox_init` with another profile fails, and says so on stderr: inside one, only what reaches the zone
+        # (`protect` checks) is worth a line.
+        libc.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+        if libc.sandbox_check(os.getpid(), None, 0) == 1:
+            return SANDBOXED_ALREADY
+        sandbox_init = libc.sandbox_init
         sandbox_init.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_char_p)]
         error = ctypes.c_char_p()
         if sandbox_init(profile(denied, plugin_dir).encode(), 0, ctypes.byref(error)) != 0:
@@ -491,10 +498,13 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
         else:
             failed = again
     open_folders = [folder for folder in denied if folder not in left and _reads(folder, denied)]
-    if open_folders:
-        warnings.append(f"{UNPROTECTED}: Hermes can read {', '.join(open_folders)}"
-                        + (f" ({failed})" if failed else ""))
-    elif failed:
+    # macOS, in a sandbox already (another load in this process, or a sandboxed parent): what this process can reach is the
+    # warning, not the `sandbox_init` that could not tighten it. ponytail: a folder empty or not there yet reads as closed.
+    writable = failed == SANDBOXED_ALREADY and os.access(plugin, os.W_OK)
+    if open_folders or writable:
+        reached = ([f"read {', '.join(open_folders)}"] if open_folders else []) + ([f"write {plugin}"] if writable else [])
+        warnings.append(f"{UNPROTECTED}: Hermes can {' and '.join(reached)}" + (f" ({failed})" if failed else ""))
+    elif failed and failed != SANDBOXED_ALREADY:
         warnings.append(f"{UNPROTECTED}: {failed}")
     # `failed` under a running sandbox: a folder was left out of it, and all this still holds for the rest.
     if sys.platform == "linux" and (not failed or _sandboxed([], plugin)):
