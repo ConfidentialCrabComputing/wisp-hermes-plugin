@@ -571,7 +571,10 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None, sandboxed_lat
     if open_folders or writable:
         reached = ([f"read {', '.join(open_folders)}"] if open_folders else []) + ([f"write {plugin}"] if writable else [])
         warnings.append(f"{UNPROTECTED}: Hermes can {' and '.join(reached)}" + (f" ({failed})" if failed else ""))
-    elif failed and failed != SANDBOXED_ALREADY:
+    elif failed == SANDBOXED_ALREADY:
+        # Nothing reaches the zone, so this is Wisp's sandbox, where Chrome's own cannot start either.
+        _without_chromes_sandbox()
+    elif failed:
         warnings.append(f"{UNPROTECTED}: {failed}")
     # `failed` under a running sandbox: a folder was left out of it, and all this still holds for the rest.
     if sys.platform == "linux" and (not failed or _sandboxed([], plugin)):

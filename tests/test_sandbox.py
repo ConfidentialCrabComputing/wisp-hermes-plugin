@@ -338,6 +338,18 @@ print(os.environ.get("AGENT_BROWSER_ARGS"), browser_launcher.needs_chromium_sand
 
                 self.assertEqual(done.stdout.split(), [after, "True"])
 
+    @macos
+    def test_a_hermes_started_inside_the_sandbox_runs_the_browser_without_chromes_own_sandbox(self):
+        done = self.python(f"""
+import os, subprocess, sys
+load_plugin()
+subprocess.run([sys.executable, {str(FAKE / "hermes")!r}, "python",
+                "load_plugin(); from tools import browser_launcher; print(browser_launcher.needs_chromium_sandbox_bypass())"],
+               env=os.environ, check=True)""")
+
+        self.assertEqual(done.stdout.split(), ["True"], done.stderr)
+        self.assertNotIn(UNPROTECTED, done.stderr)
+
     def test_wisp_on_another_machine_applies_no_sandbox_and_warns_nothing(self):
         shutil.rmtree(self.data_dir)
         self.zone["deskRoot"] = str(self.tmp / "elsewhere" / "desks")
