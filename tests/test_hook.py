@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 FAKE = Path(__file__).resolve().parent / "fake"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 ZONE = {"dataDir": "/home/u/.wisp", "deskRoot": "/home/u/Wisp",
         "privateFolders": [{"path": "/home/u/bank"}], "services": ["gmail"]}
 
@@ -23,8 +23,11 @@ class Hook(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-hook-"))
         self.addCleanup(shutil.rmtree, self.home)
-        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
-        (self.home / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["wisp"]}}))
+        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
+        # Connected, to an endpoint that cannot answer: the zone comes from the cache.
+        (self.home / "config.yaml").write_text(json.dumps(
+            {"plugins": {"enabled": ["wisp"]}, "mcp_servers": {"wisp": {"url": "http://127.0.0.1:9/mcp"}}}))
+        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
         self.zone(ZONE)
 
     def zone(self, zone):

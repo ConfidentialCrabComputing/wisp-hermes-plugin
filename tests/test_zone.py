@@ -14,13 +14,23 @@ import unittest
 from pathlib import Path
 
 FAKE = Path(__file__).resolve().parent / "fake"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 # Hermes drops a longer section whole (`plugins_dispatch.MAX_SYSTEM_PROMPT_SECTION_CHARS`).
 SECTION_CAP = 4000
 ZONE = {"dataDir": "/home/u/.wisp", "deskRoot": "/home/u/.wisp/desks",
         "privateFolders": [{"path": "/home/u/bank"}], "services": ["gmail"]}
 # Answers to `tools/call` that are no `CallToolResult`.
 MALFORMED = (b"[]", b"5", b'{"result": "x"}', b'{"result": {"isError": true, "content": "x"}}')
+# Under the plugin's 10 s between looks: what one look takes.
+REVIVE_WITHIN = 5
+
+
+def _closed_url():
+    """A loopback `/mcp` nothing listens on: the zone call fails at once and the cache stands in."""
+    closed = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    port = closed.server_address[1]
+    closed.server_close()
+    return f"http://127.0.0.1:{port}/mcp"
 
 
 @unittest.skipIf(sys.platform == "win32", "POSIX paths throughout, which are not absolute on Windows")
@@ -28,14 +38,16 @@ class Rule(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-zone-"))
         self.addCleanup(shutil.rmtree, self.home)
-        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
-        self.config = {"plugins": {"enabled": ["wisp"]}}
+        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
+        # Connected, as `hermes wisp connect` leaves a profile.
+        self.config = {"plugins": {"enabled": ["wisp"]}, "mcp_servers": {"wisp": {"url": _closed_url()}}}
+        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
 
-    def hermes(self, *argv, **extra_env):
+    def hermes(self, *argv, input=None, **extra_env):
         (self.home / "config.yaml").write_text(json.dumps(self.config))
         env = {key: value for key, value in os.environ.items() if key.lower() != "no_proxy"}
         env.update(HERMES_HOME=str(self.home), PATH=f"{FAKE}{os.pathsep}{os.environ['PATH']}", **extra_env)
-        done = subprocess.run(["hermes", *argv], env=env, capture_output=True, text=True, timeout=60)
+        done = subprocess.run(["hermes", *argv], env=env, capture_output=True, text=True, timeout=60, input=input)
         self.assertEqual(done.returncode, 0, done.stderr)
         return done.stdout
 
@@ -106,13 +118,85 @@ Desk root /home/u/.wisp/desks;
             with self.subTest(source=source.name):
                 self.assertFalse({"\u2028", "\u2029"} & set(source.read_text(encoding="utf-8")))
 
+    def refusal(self):
+        """What the hook answers a read inside the zone."""
+        return json.loads(self.hermes("pre-tool-call", input=json.dumps([["read_file", {"path": "/home/u/bank/a.csv"}]])))[0]
+
+    def not_connected(self):
+        """Each way a profile can leave Wisp unconnected: no `mcp_servers.wisp`, or no credential."""
+        server = self.config.pop("mcp_servers")
+        yield "no mcp_servers.wisp"
+        self.config["mcp_servers"] = server
+        (self.home / ".env").write_text("")
+        yield "no credential"
+
+    def test_unconnected_beside_integrates_pin_the_rule_and_the_refusal_say_to_run_integrate(self):
+        (self.home / "plugins" / "wisp" / "pin.json").write_text(json.dumps({**ZONE, "url": _closed_url()}))
+
+        for state in self.not_connected():
+            with self.subTest(state):
+                rule = self.rule(ZONE)
+
+                self.assertIn("Wisp is not connected", rule)
+                self.assertIn("`wisp integrate hermes`", rule)
+                self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+                self.assertIn("Wisp is not connected", self.refusal())
+                self.assertIn("`wisp integrate hermes`", self.refusal())
+
+    def test_unconnected_with_no_pin_the_rule_and_the_refusal_say_to_run_connect(self):
+        for state in self.not_connected():
+            with self.subTest(state):
+                rule = self.rule(ZONE)
+
+                self.assertIn("Wisp is not connected", rule)
+                self.assertIn("`hermes wisp connect https://<host>/mcp`", rule)
+                self.assertNotIn("wisp integrate hermes", rule)
+                self.assertIn("`hermes wisp connect https://<host>/mcp`", self.refusal())
+
+    def told(self, **env):
+        """The rule and the refusal of a read inside the zone, with the fake Hermes's `env`."""
+        (self.home / "plugins" / "wisp" / "zone.json").write_text(json.dumps(ZONE))
+        rule = json.loads(self.hermes("sections", **env)).get("wisp-routing")
+        read = [["read_file", {"path": "/home/u/bank/a.csv"}]]
+        return rule, json.loads(self.hermes("pre-tool-call", input=json.dumps(read), **env))[0]
+
+    def test_a_check_that_raises_says_wisp_is_not_connected_never_ask_wisp(self):
+        (self.home / "plugins" / "wisp" / "pin.json").write_text(json.dumps({**ZONE, "url": _closed_url()}))
+
+        for raises in ("FAKE_HERMES_RAW_CONFIG_RAISES", "FAKE_HERMES_ENV_VALUE_RAISES"):
+            with self.subTest(raises):
+                rule, refusal = self.told(**{raises: "1"})
+
+                self.assertIn("Wisp is not connected", rule)
+                self.assertNotIn("ask_wisp", rule)
+                self.assertIn("`wisp integrate hermes`", refusal)
+                self.assertNotIn("ask_wisp", refusal)
+
+    def test_a_secret_hermes_guards_is_read_from_the_profiles_env_not_raised(self):
+        unscoped = {"FAKE_HERMES_ENV_VALUE_UNSCOPED": "1"}
+
+        rule, refusal = self.told(**unscoped)
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn("ask_wisp", refusal)
+
+        (self.home / ".env").write_text("")
+        rule, refusal = self.told(**unscoped)
+        self.assertIn("`hermes wisp connect https://<host>/mcp`", rule)
+        self.assertIn("`hermes wisp connect https://<host>/mcp`", refusal)
+
+    def test_unconnected_with_no_zone_at_all_the_rule_still_says_so(self):
+        self.config.pop("mcp_servers")
+
+        self.assertIn("`hermes wisp connect https://<host>/mcp`",
+                      json.loads(self.hermes("sections"))["wisp-routing"])
+
     def test_a_malformed_cache_leaves_the_plugin_loaded_and_no_rule(self):
         for zone in ([ZONE], "zone", {**ZONE, "privateFolders": [{"name": "bank"}]}):
             with self.subTest(zone=zone):
                 self.assertIsNone(self.rule(zone))
                 self.assertIn("--remove", self.hermes("wisp", "connect", "--help"))
 
-    def endpoint(self, answer):
+    def endpoint(self, answer, port=0):
         """A Wisp endpoint that initializes, then answers `tools/call` through `answer(handler)`."""
         class Mcp(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -133,12 +217,13 @@ Desk root /home/u/.wisp/desks;
             def log_message(self, *args):
                 pass
 
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Mcp)
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Mcp)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        self.config["mcp_servers"] = {"wisp": {"url": f"http://127.0.0.1:{server.server_address[1]}/mcp"}}
-        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
+        if not port:  # on a port of its own: the profile is connected to it; on `port`, the config already names it
+            self.config["mcp_servers"] = {"wisp": {"url": f"http://127.0.0.1:{server.server_address[1]}/mcp"}}
+            (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
 
     def test_an_endpoint_that_never_finishes_its_answer_leaves_the_cached_zone_within_the_limit(self):
         def drip(handler):
@@ -161,6 +246,30 @@ Desk root /home/u/.wisp/desks;
         self.assertLess(time.monotonic() - started, 10)
         self.assertIn("/home/u/bank", rule)
 
+    def test_an_answer_that_breaks_off_leaves_the_cached_zone(self):
+        def broken_off(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.end_headers()
+            handler.wfile.write(b"400\r\ndata: {")  # a chunk cut short: the client's read raises IncompleteRead
+            handler.close_connection = True
+
+        self.endpoint(broken_off)
+
+        self.assertIn("/home/u/bank", self.rule(ZONE))
+
+    def test_a_stream_that_ends_with_no_answer_leaves_the_cached_zone(self):
+        def unanswered(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            handler.wfile.write(b": keep\n\n")  # HTTP/1.0: the close ends the stream cleanly
+
+        self.endpoint(unanswered)
+
+        self.assertIn("/home/u/bank", self.rule(ZONE))
+
     def test_a_malformed_answer_leaves_the_cached_zone(self):
         for body in MALFORMED:
             with self.subTest(body=body):
@@ -174,6 +283,317 @@ Desk root /home/u/.wisp/desks;
                 self.endpoint(malformed)
 
                 self.assertIn("/home/u/bank", self.rule(ZONE))
+
+    def answers(self, *zones):
+        """An endpoint whose `wisp_zone` answers `zones` in turn, the last one ever after: the first at Hermes's start,
+        the next when a session's prompt is built."""
+        left = list(zones)
+        self.endpoint(lambda handler: self.answer_zone(handler, left.pop(0) if len(left) > 1 else left[0]))
+
+    @staticmethod
+    def answer_zone(handler, zone):
+        body = json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"content": [], "structuredContent": zone}}).encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+    def test_a_connector_connected_since_hermess_start_is_named_by_a_new_session(self):
+        gmail = {"name": "gmail", "displayName": "Gmail", "description": "Mail"}
+        self.answers({**ZONE, "connectors": [{**gmail, "status": "requires_auth"}]},
+                     {**ZONE, "connectors": [{**gmail, "status": "connected"}]})
+
+        rule = json.loads(self.hermes("sections"))["wisp-routing"]
+
+        self.assertIn("Wisp's services: Gmail (gmail): Mail;", rule)
+
+    def test_a_private_folder_added_since_hermess_start_is_not_named_by_a_new_session(self):
+        self.answers(ZONE, {**ZONE, "privateFolders": [*ZONE["privateFolders"], {"path": "/home/u/taxes"}]})
+
+        rule = json.loads(self.hermes("sections"))["wisp-routing"]
+
+        self.assertIn("/home/u/bank", rule)
+        self.assertNotIn("/home/u/taxes", rule)
+
+    def test_a_session_whose_endpoint_does_not_answer_takes_the_connectors_from_the_cache(self):
+        cache = self.home / "plugins" / "wisp" / "zone.json"
+        calls = []
+
+        def answer(handler):
+            calls.append(1)
+            if len(calls) == 1:
+                return self.answer_zone(handler, {**ZONE, "connectors": []})
+            # Since Hermes's start, the cache learnt of a connected Connector, and the endpoint stopped answering.
+            cache.write_text(json.dumps({**ZONE, "connectors": [{"name": "notion", "status": "connected"}]}))
+            handler.send_error(503)
+
+        self.endpoint(answer)
+
+        rule = json.loads(self.hermes("sections"))["wisp-routing"]
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("Wisp's services: notion;", rule)
+
+    def test_a_stopped_runtime_a_new_session_is_told_wisp_is_not_answering_never_to_do_the_task_itself(self):
+        # Connected, Hermes's MCP client still holding `wisp`, and nothing listening on its loopback endpoint.
+        rule, refusal = self.told(FAKE_HERMES_WISP_STATUS="connected")
+
+        self.assertIn("Wisp is not answering", rule)
+        self.assertIn("do not do", rule)
+        self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn("/home/u/bank", rule)
+        self.assertIn("Wisp is not answering", refusal)
+
+    def test_wisp_on_another_machine_not_answering_a_new_session_is_told_so(self):
+        # Over https, no zone cached, and the endpoint does not answer.
+        self.config["mcp_servers"]["wisp"]["url"] = "https://wisp.invalid/mcp"
+
+        rule = json.loads(self.hermes("sections"))["wisp-routing"]
+
+        self.assertIn("Wisp is not answering", rule)
+        self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+
+    def test_connected_after_the_load_a_new_session_is_told_to_route_to_wisp_and_its_connectors(self):
+        # README's two machines: the plugin is enabled into a running gateway, then `hermes wisp connect` succeeds.
+        self.answers({**ZONE, "connectors": [{"name": "gmail", "displayName": "Gmail", "status": "connected"}]})
+        connected = json.dumps(self.config)
+        self.config.pop("mcp_servers")
+
+        rule = self.live(f"""with open({str(self.home / "config.yaml")!r}, "w") as config:
+    config.write({connected!r})
+print(told()[0])""")
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn("Gmail (gmail)", rule)
+
+    def back_later(self, host, zone=ZONE):
+        """The sections of a session before and of one after Wisp at `host`, not answering at the load with no zone
+        cached, answers `zone`."""
+        (self.home / "plugins" / "wisp" / "zone.json").unlink(missing_ok=True)
+        port = int(_closed_url().rsplit(":", 1)[1].split("/")[0])
+        self.config["mcp_servers"]["wisp"]["url"] = f"http://{host}:{port}/mcp"
+        self.answers_later(port, 3, zone)
+        return json.loads(self.live("""before = told()[0]
+time.sleep(4)
+print(json.dumps([before, told()[0]]))"""))
+
+    def test_a_wisp_back_since_the_load_gives_a_new_session_the_routing_rule(self):
+        # Another machine (an address the plugin does not take for loopback), and an unpinned `ssh -L` tunnel.
+        for host in ("0.0.0.0", "127.0.0.1"):
+            with self.subTest(host):
+                before, after = self.back_later(host)
+
+                self.assertIn("Wisp is not answering", before)
+                self.assertNotIn("Hand these tasks to the `ask_wisp` tool", before)
+                self.assertIn("Hand these tasks to the `ask_wisp` tool", after)
+                self.assertIn("gmail", after)
+
+    def test_an_unpinned_loopback_wisp_back_since_the_load_is_not_called_out_of_reach(self):
+        # The start had no zone to sandbox Hermes from.
+        before, after = self.back_later("127.0.0.1")
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", after)
+        self.assertIn("/home/u/bank", after)
+        self.assertIn("this Hermes is not sandboxed from them", after)
+        for rule in (before, after):
+            self.assertNotIn("you cannot reach them", rule)
+
+    def test_a_wisp_on_another_machine_back_since_the_load_is_out_of_reach(self):
+        _, after = self.back_later("0.0.0.0")
+
+        self.assertIn("you cannot reach them", after)
+
+    def test_a_zone_of_a_wrong_shape_after_a_load_with_none_leaves_the_section_blank(self):
+        _, after = self.back_later("127.0.0.1", {"privateFolders": [{"name": "bank"}]})
+
+        self.assertEqual(after, "")
+
+    def asked_wisp(self, **env):
+        """What the hook answers an `ask_wisp` call, as an open session whose tool list still has it makes one."""
+        call = [["mcp__wisp__ask_wisp", {"task": "How many unread emails do I have?"}]]
+        return json.loads(self.hermes("pre-tool-call", input=json.dumps(call), **env))[0]
+
+    def test_wisp_parked_by_hermes_the_rule_and_an_ask_wisp_call_say_wisp_is_not_answering(self):
+        self.answers(ZONE)
+        parked = {"FAKE_HERMES_WISP_STATUS": "failed", "FAKE_HERMES_WISP_RECONNECTING": "1"}
+
+        rule = json.loads(self.hermes("sections", **parked))["wisp-routing"]
+
+        self.assertIn("Wisp is not answering", rule)
+        self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn("Wisp is not answering", self.asked_wisp(**parked))
+
+    def test_wisp_connected_and_answering_gets_the_routing_rule_and_ask_wisp_proceeds(self):
+        self.answers(ZONE)
+        connected = {"FAKE_HERMES_WISP_STATUS": "connected"}
+
+        rule = json.loads(self.hermes("sections", **connected))["wisp-routing"]
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIsNone(self.asked_wisp(**connected))
+
+    def test_wisp_parked_by_hermes_is_reconnected_soon_after_its_endpoint_answers_with_no_restart(self):
+        # Hermes's own retry of a parked server comes every 300 s.
+        self.answers(ZONE)
+        self.running(FAKE_HERMES_WISP_STATUS="failed", FAKE_HERMES_WISP_RECONNECTING="1")
+
+        self.assertEqual(self.reconnects(), "wisp\n")
+
+    def running(self, before="", seconds=15, **env):
+        """A running Hermes, the plugin loaded (then `before` run), for `seconds` or until it asks for a reconnect."""
+        self.hermes("python", f"""load_plugin()
+{before}
+import os, time
+deadline = time.monotonic() + {seconds}
+while time.monotonic() < deadline and not os.path.exists({str(self.home / "reconnect.log")!r}):
+    time.sleep(0.2)
+""", **env)
+
+    def reconnects(self):
+        """The servers the plugin asked Hermes to reconnect, one per line."""
+        log = self.home / "reconnect.log"
+        return log.read_text() if log.exists() else ""
+
+    def test_wisp_refusing_hermess_credential_is_told_to_connect_again_and_asked_once_until_the_credential_changes(self):
+        # A revoked Host Agent Credential: Wisp answers 401, Hermes failed `wisp` for good.
+        (self.home / "plugins" / "wisp" / "zone.json").write_text(json.dumps(ZONE))
+        asked = []
+
+        def refuse(handler):
+            asked.append(handler.headers["Authorization"])
+            handler.send_error(401)
+
+        self.endpoint(refuse)
+
+        out = self.live(f"""time.sleep(2)
+print(json.dumps(told()))
+time.sleep(10)  # past the next look
+with open({str(self.home / ".env")!r}, "w") as env:
+    env.write("WISP_CREDENTIAL_TOKEN=wisp_hermes_n3w\\n")
+time.sleep(10)""", FAKE_HERMES_WISP_STATUS="failed")
+
+        rule, refusal = json.loads(out)
+        for told in (rule, refusal):
+            self.assertIn("refused Hermes's credential", told)
+            self.assertIn("`hermes wisp connect https://<host>/mcp`", told)
+            self.assertNotIn("within a minute", told)
+        self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertEqual(self.reconnects(), "")
+        # Hermes's start reads the zone, the first look asks, the next does not, the new credential is asked.
+        self.assertEqual(asked, ["Bearer wisp_hermes_s3cr3t"] * 2 + ["Bearer wisp_hermes_n3w"])
+
+    def refused_then_loaded_again(self, script):
+        """What `script` prints in a running Hermes whose `wisp` Hermes failed, its credential refused (401) by the time
+        the plugin is loaded again (a forced rediscovery): `first` and `again` are the two loads' contexts, `told(ctx)`
+        the rule a session starting now gets from `ctx` and the hook's answer to an `ask_wisp` call."""
+        (self.home / "plugins" / "wisp" / "zone.json").write_text(json.dumps(ZONE))
+        self.endpoint(lambda handler: handler.send_error(401))
+        return self.hermes("python", f"""import json, os, time
+def told(ctx):
+    return ctx.sections["wisp-routing"]({{}}), pre_tool_call(ctx, "mcp__wisp__ask_wisp", {{"task": "x"}})
+first = load_plugin()
+time.sleep(2)  # the first look asks Wisp
+again = load_plugin()
+{script}""", FAKE_HERMES_WISP_STATUS="failed")
+
+    def test_a_refused_credential_is_told_by_the_plugin_loaded_again_in_the_same_process(self):
+        out = self.refused_then_loaded_again("print(json.dumps(told(again)))")
+
+        for told in json.loads(out):
+            self.assertIn("refused Hermes's credential", told)
+            self.assertIn("`hermes wisp connect https://<host>/mcp`", told)
+
+    def test_a_refusal_cleared_once_wisp_connects_is_cleared_for_every_load(self):
+        # Seen connected through the second load, then failed again before the next look: Wisp is not answering, to
+        # the first load as to the second.
+        out = self.refused_then_loaded_again("""os.environ["FAKE_HERMES_WISP_STATUS"] = "connected"
+told(again)
+os.environ["FAKE_HERMES_WISP_STATUS"] = "failed"
+print(json.dumps([*told(first), *told(again)]))""")
+
+        for told in json.loads(out):
+            self.assertIn("Wisp is not answering", told)
+            self.assertNotIn("refused Hermes's credential", told)
+
+    def test_wisp_that_never_connected_because_its_endpoint_refused_is_reconnected_once_it_answers(self):
+        port = int(self.config["mcp_servers"]["wisp"]["url"].rsplit(":", 1)[1].split("/")[0])
+        # Hermes failed `wisp` at its start, the Runtime down; it answers a moment later.
+        self.answers_later(port, 3)
+
+        self.running(FAKE_HERMES_WISP_STATUS="failed")
+
+        self.assertEqual(self.reconnects(), "wisp\n")
+
+    def test_a_loopback_wisp_answering_by_the_first_look_that_hermes_failed_is_reconnected_within_it(self):
+        # Hermes's connect failed mid restart, and the Runtime answers again before the plugin first looks.
+        self.answers(ZONE)
+
+        self.running(seconds=REVIVE_WITHIN, FAKE_HERMES_WISP_STATUS="failed")
+
+        self.assertEqual(self.reconnects(), "wisp\n")
+
+    def test_a_reconnect_that_does_not_land_is_asked_for_again_and_wisp_stays_not_answering(self):
+        self.answers(ZONE)
+
+        out = self.live("""time.sleep(12)  # past the next look, `wisp` still failed
+print(json.dumps(told()))""", FAKE_HERMES_WISP_STATUS="failed")
+
+        self.assertEqual(self.reconnects(), "wisp\nwisp\n")
+        for told in json.loads(out):
+            self.assertIn("Wisp is not answering", told)
+            self.assertNotIn("refused Hermes's credential", told)
+
+    def live(self, script, **env):
+        """What `script` prints, run in a running Hermes's process with the plugin loaded as `ctx`: there `told()` is
+        the rule a session starting now gets and the hook's answer to an `ask_wisp` call, and `wait(seconds)` waits
+        that long, or until the plugin has asked for a reconnect."""
+        return self.hermes("python", f"""import json, os, time
+ctx = load_plugin()
+def told():
+    return ctx.sections["wisp-routing"]({{}}), pre_tool_call(ctx, "mcp__wisp__ask_wisp", {{"task": "x"}})
+def wait(seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not os.path.exists({str(self.home / "reconnect.log")!r}):
+        time.sleep(0.2)
+{script}""", **env)
+
+    def answers_later(self, port, seconds, zone=ZONE):
+        """An endpoint answering `zone` on `port`, from `seconds` on."""
+        later = threading.Timer(seconds, lambda: self.endpoint(lambda handler: self.answer_zone(handler, zone), port))
+        later.start()
+        self.addCleanup(later.cancel)
+
+    def test_a_remote_wisp_down_while_hermes_failed_it_is_not_answering_never_refused_and_is_reconnected_once_up(self):
+        # Wisp on another machine (an address the plugin does not take for loopback), down at Hermes's start: Hermes
+        # failed `wisp` and, never having connected it, does not call it reconnecting.
+        port = int(_closed_url().rsplit(":", 1)[1].split("/")[0])
+        self.config["mcp_servers"]["wisp"]["url"] = f"http://0.0.0.0:{port}/mcp"
+        self.answers_later(port, 4)
+
+        out = self.live("""time.sleep(2)
+print(json.dumps(told()))
+wait(15)""", FAKE_HERMES_WISP_STATUS="failed")
+
+        for told in json.loads(out):
+            self.assertIn("Wisp is not answering", told)
+            self.assertNotIn("refused Hermes's credential", told)
+        self.assertEqual(self.reconnects(), "wisp\n")
+
+    def test_after_connect_remove_a_parked_wisp_is_not_reconnected(self):
+        self.config.pop("mcp_servers")
+
+        self.running(seconds=2, FAKE_HERMES_WISP_STATUS="failed", FAKE_HERMES_WISP_RECONNECTING="1")
+
+        self.assertEqual(self.reconnects(), "")
+
+    def test_plugins_loaded_again_in_a_running_hermes_still_reconnect_wisp_from_one_thread(self):
+        # Hermes loads every plugin again in its process on a forced rediscovery (an install, a reload).
+        threads = self.hermes("python", """load_plugin(); load_plugin(); load_plugin()
+import threading
+print(sum(thread.name == "wisp-revive" for thread in threading.enumerate()))""")
+
+        self.assertEqual(threads.strip(), "1")
 
     def test_the_zone_call_to_a_loopback_endpoint_never_goes_through_a_proxy(self):
         proxied = []

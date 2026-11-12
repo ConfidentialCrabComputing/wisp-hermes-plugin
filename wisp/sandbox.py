@@ -5,6 +5,7 @@ profile's gateway service, its cron, the dashboard) is covered and every child i
 import ctypes
 import importlib.util
 import json
+import logging
 import os
 import re
 import secrets
@@ -36,15 +37,19 @@ def _ancestors(path):
 
 def profile(denied, plugin_dir):
     """The Seatbelt profile: everything allowed but the zone and writes to the plugin. A rule names a path,
-    so renaming a folder's parent would carry it out from under its rule: each parent is write-denied
-    itself (`literal`), which leaves creating files inside it alone."""
+    so whatever takes a folder out from under that path takes it out from under its rule. Each parent itself
+    (`literal`) is denied only those: `file-write-unlink`, being renamed or removed; `file-clone`, being
+    copied whole by `clonefile`, which never checks a read of what is inside; `file-write-create`, being
+    made before Wisp makes it, as a link elsewhere that every later write under the path would follow.
+    Not `file-write*`, which Seatbelt also answers `access(W_OK)` from, so Hermes would take its own home
+    for read-only, and not `file-write-mode`, so its `chmod` of its home keeps working."""
     parents = sorted({parent for path in [*denied, plugin_dir] for parent in _ancestors(path)})
     return "\n".join([
         "(version 1)",
         "(allow default)",
         *(f"(deny file-read* file-write* (subpath {_literal(path)}))" for path in denied),
         f"(deny file-write* (subpath {_literal(plugin_dir)}))",
-        *(f"(deny file-write* (literal {_literal(parent)}))" for parent in parents),
+        *(f"(deny file-write-unlink file-clone file-write-create (literal {_literal(parent)}))" for parent in parents),
         "",
     ])
 
@@ -216,6 +221,19 @@ def _check_repeated(denied, plugin_dir, wisp):
     return problem
 
 
+def _release_own_chats():
+    """The chats this process holds in Hermes's registry, let go before it becomes the supervisor. Hermes takes a
+    chat's holder for alive while its PID and start time are, and the supervisor keeps both: a chat open when the
+    plugin loads under a running gateway (enabled live) would stay locked to the sandboxed Hermes until a restart.
+    At a cold start this process holds none. Never an exception: the re-exec goes on either way.
+    ponytail: Hermes's own sweep keeps a chat opened in its last 30 seconds; such a chat still needs `/restart`."""
+    try:
+        from hermes_cli.active_sessions import release_orphaned_leases
+        release_orphaned_leases(set())
+    except Exception as exc:  # noqa: BLE001 — an older or rewritten Hermes costs the re-exec nothing
+        logging.getLogger(__name__).warning("Wisp: could not release this process's open chats: %r", exc)
+
+
 def _reexec(denied, plugin_dir, wisp):
     """Linux: this Hermes started again under bubblewrap, with the arguments `wisp sandbox-exec` prints, and this
     process, keeping its PID, turned into the supervisor (`supervise.py`); the reason it could not or a folder was
@@ -277,6 +295,7 @@ def _reexec(denied, plugin_dir, wisp):
         return f"wisp sandbox-exec failed: bubblewrap exited {started.wait()}"
     if notify is not None:
         os.set_inheritable(notify.fileno(), True)
+    _release_own_chats()
     try:
         # `-I` drops `PYTHON*`, not the loader's variables. Its `NOTIFY_SOCKET` stays systemd's own.
         os.execve(sys.executable, [sys.executable, "-I", "-S", os.path.join(plugin_dir, "supervise.py"),
@@ -356,11 +375,14 @@ def _on_the_way(path):
 
 def _start_root(folder, linked):
     """What Hermes starts from that denying `folder` would take from it, decided once with no probe to time: `sys.prefix`,
-    `sys.base_prefix` or the source tree of `hermes_cli` when `folder` holds one or, for a zone path that does not name
-    `folder` itself (`linked`: a model can plant a link), lies inside one; `sys.executable` or the entry script when it
-    holds one. Each by every link on its way as well as by `realpath`; a real folder inside a root stays closed, even one
-    Hermes needs. Else None. What cannot be found is not looked for: that alone never fails a start."""
-    roots = [_on_the_way(root) for root in filter(None, (sys.prefix, sys.base_prefix))]
+    `sys.base_prefix`, a `sys.path` entry (what Hermes imports from, later too) or the source tree of `hermes_cli` when
+    `folder` holds one or, for a zone path that does not name `folder` itself (`linked`: a model can plant a link), lies
+    inside one; `sys.executable` or the entry script when it holds one. Each by every link on its way as well as by
+    `realpath`; a real folder inside a root stays closed, even one Hermes needs. Else None. What cannot be found is not
+    looked for: that alone never fails a start."""
+    # ponytail: an empty entry (the working directory) is left out, a start's directory being no part of Hermes.
+    imported = [os.path.abspath(entry) for entry in sys.path if isinstance(entry, str) and entry]
+    roots = [_on_the_way(root) for root in filter(None, (sys.prefix, sys.base_prefix, *imported))]
     package = getattr(sys.modules.get("hermes_cli"), "__file__", None)
     if package:
         *links, real = _on_the_way(package)

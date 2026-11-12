@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 FAKE = Path(__file__).resolve().parent / "fake"
 WISP = Path(__file__).resolve().parent / "wisp-from-source"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 UNPROTECTED = "Wisp's zone is unprotected"
 macos = unittest.skipUnless(sys.platform == "darwin", "the macOS sandbox")
 linux = unittest.skipUnless(sys.platform == "linux", "the Linux sandbox")
@@ -70,7 +70,7 @@ class HermesHome(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         self.home = self.tmp / "hermes"
         self.plugin = self.home / "plugins" / "wisp"
-        shutil.copytree(PLUGIN, self.plugin, ignore=shutil.ignore_patterns("__pycache__", "zone.json", ".git", "tests"))
+        shutil.copytree(PLUGIN, self.plugin, ignore=shutil.ignore_patterns("__pycache__", "zone.json"))
         (self.home / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["wisp"]}}))
         self.data_dir = self.tmp / "wisp"
         self.bank = self.tmp / "bank"
@@ -102,7 +102,7 @@ class HermesHome(unittest.TestCase):
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
         source = self.tmp / "source"
         shutil.copytree(FAKE, source, ignore=shutil.ignore_patterns("__pycache__"))
-        (source / "tools").mkdir()
+        (source / "tools").mkdir(exist_ok=True)
         return venv, source
 
     def start_as(self, python, hermes, code):
@@ -218,6 +218,75 @@ for old, new in (({str(parent)!r}, {str(self.tmp / "docs2")!r}), ({str(self.tmp)
 
         self.assertEqual(done.stdout.split(), ["refused", "refused"])
 
+    @macos
+    def test_a_zone_folder_cannot_be_read_through_a_clone_of_its_parent_or_grandparent(self):
+        parent = self.tmp / "docs"
+        parent.mkdir()
+        self.bank.rename(parent / "bank")
+        self.zone["privateFolders"] = [{"path": str(parent / "bank")}]
+        elsewhere = Path(os.path.realpath(tempfile.mkdtemp(prefix="wisp-hermes-clone-")))
+        self.addCleanup(shutil.rmtree, elsewhere)
+
+        # APFS's `clonefile` copies a whole tree in the kernel, without a read of what is inside.
+        done = self.python(f"""
+import ctypes, os
+load_plugin()
+libc = ctypes.CDLL(None, use_errno=True)
+for source, clone in (({str(parent)!r}, {str(elsewhere / "docs")!r}), ({str(self.tmp)!r}, {str(elsewhere / "tmp")!r})):
+    print("cloned" if libc.clonefile(source.encode(), clone.encode(), 0) == 0 else "refused")""")
+
+        self.assertEqual(done.stdout.split(), ["refused", "refused"], done.stderr)
+        self.assertEqual(list(elsewhere.rglob("secret.txt")), [])
+
+    @macos
+    def test_a_missing_ancestor_of_a_zone_folder_cannot_be_made_by_the_sandboxed_hermes(self):
+        self.zone["privateFolders"].append({"path": str(self.tmp / "m" / "n" / "taxes")})
+        elsewhere = Path(os.path.realpath(tempfile.mkdtemp(prefix="wisp-hermes-plant-")))
+        self.addCleanup(shutil.rmtree, elsewhere)
+
+        # One Hermes each: what the first made would stand in the second's way, and nothing inside can remove it.
+        for make in (f"os.mkdir({str(self.tmp / 'm')!r})", f"os.symlink({str(elsewhere)!r}, {str(self.tmp / 'm')!r})"):
+            done = self.python(f"""
+import os
+load_plugin()
+try:
+    {make}
+    print("made")
+except OSError:
+    print("refused")""")
+
+            self.assertEqual(done.stdout.split(), ["refused"], make + done.stderr)
+            self.assertFalse(os.path.lexists(self.tmp / "m"))
+
+    @macos
+    def test_a_parent_the_sandbox_keeps_in_place_answers_access_chmod_and_new_files_as_without_it(self):
+        # Empty, as an absent Private Folder's parent can be: only the sandbox stands between it and an `rmdir`.
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        self.zone["privateFolders"].append({"path": str(empty / "taxes")})
+        parents = [self.plugin.parent, self.home, self.tmp, empty]
+
+        done = self.python(f"""
+import os
+load_plugin()
+for parent in {[str(p) for p in parents]!r}:
+    said = [os.access(parent, os.W_OK)]
+    try:
+        os.chmod(parent, 0o700)
+        open(os.path.join(parent, "new.txt"), "w").write("new")
+        said.append("changed")
+    except OSError as exc:
+        said.append(repr(exc))
+    for move in (lambda: os.rename(parent, parent + ".moved"), lambda: os.rmdir(parent)):
+        try:
+            move()
+            said.append("moved")
+        except OSError:
+            said.append("refused")
+    print(*said)""")
+
+        self.assertEqual(done.stdout.splitlines(), ["True changed refused refused"] * len(parents), done.stderr)
+
     @sandboxed
     def test_wisps_data_directory_and_desk_root_are_refused(self):
         self.assertFalse(self.readable(self.data_dir / "secret.txt"))
@@ -251,10 +320,10 @@ for path in ({str(self.plugin / "__init__.py")!r}, {str(self.plugin / "zone.json
         self.assertEqual(done.stdout.split(), ["refused"] * 3)
 
     @macos
-    def test_connect_remove_inside_the_sandbox_finishes_and_names_the_cache_it_cannot_delete(self):
+    def test_connect_remove_inside_the_sandbox_finishes_and_says_nothing_of_the_cache_it_keeps(self):
         done = self.hermes("wisp", "connect", "--remove")
 
-        self.assertIn(str(self.plugin / "zone.json"), done.stdout)
+        self.assertNotIn("zone.json", done.stdout + done.stderr)
 
     @sandboxed
     def test_the_browser_runs_without_chromes_own_sandbox_after_the_users_own_args(self):
@@ -325,6 +394,44 @@ except OSError:
         self.zone = None
 
         self.assertIn(UNPROTECTED, self.python("load_plugin()").stderr)
+
+    def rule(self):
+        """The routing rule of a session, connected to a loopback port nothing listens on: the zone from the cache."""
+        closed = socket.create_server(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        (self.home / "config.yaml").write_text(json.dumps(
+            {"plugins": {"enabled": ["wisp"]}, "mcp_servers": {"wisp": {"url": f"http://127.0.0.1:{port}/mcp"}}}))
+        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
+        return json.loads(self.hermes("sections").stdout)["wisp-routing"]
+
+    @posix
+    def test_a_start_left_unprotected_does_not_call_wisps_folders_out_of_reach(self):
+        # A Private Folder holding Hermes's home is left out of the sandbox.
+        self.zone["privateFolders"] = [{"path": str(self.tmp)}]
+
+        rule = self.rule()
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", rule)
+        self.assertIn(str(self.tmp), rule)
+        self.assertIn("this Hermes is not sandboxed from them", rule)
+        self.assertNotIn("you cannot reach them", rule)
+
+    @sandboxed
+    def test_a_sandboxed_start_calls_wisps_folders_out_of_reach(self):
+        self.assertIn("you cannot reach them", self.rule())
+
+    def test_a_zone_it_cannot_read_from_another_machine_is_a_connection_problem_not_unprotected(self):
+        # Connected over https to an endpoint that does not answer, with no zone cached: no sandbox here by design.
+        (self.home / "config.yaml").write_text(json.dumps(
+            {"plugins": {"enabled": ["wisp"]}, "mcp_servers": {"wisp": {"url": "https://wisp.invalid/mcp"}}}))
+        (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
+        self.zone = None
+
+        stderr = self.python("load_plugin()").stderr
+
+        self.assertNotIn(UNPROTECTED, stderr)
+        self.assertIn("Wisp is not answering at https://wisp.invalid/mcp", stderr)
 
     @sandboxed
     def test_sandboxed_it_does_not_warn(self):
@@ -918,6 +1025,7 @@ class Pin(HermesHome):
     def setUp(self):
         super().setUp()
         (self.home / ".env").write_text("WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\n")
+        self.repoint(_closed_url())
         self.zone = None
         self.pin = {"url": _closed_url(), "dataDir": str(self.data_dir), "deskRoot": str(self.data_dir / "desks"),
                     "privateFolders": [{"path": str(self.bank)}]}
@@ -931,8 +1039,10 @@ class Pin(HermesHome):
             (self.plugin / "pin.json").write_text(json.dumps(self.pin))
         return super().hermes(*argv, **kwargs)
 
-    def endpoint(self, zone):
-        """A fake Wisp MCP endpoint whose `wisp_zone` answers `zone`; its URL."""
+    def endpoint(self, zone, down=None, seal_fails=None):
+        """A fake Wisp MCP endpoint whose `wisp_zone` answers `zone`; its URL. The tools asked for go to `self.called`.
+        While the file `down` exists `wisp_zone` answers no zone; while `seal_fails` exists `wisp_sealed` fails."""
+        called = self.called = []
 
         class Mcp(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -941,7 +1051,16 @@ class Pin(HermesHome):
                     self.send_response(202)
                     self.end_headers()
                     return
-                result = ({"content": [], "structuredContent": zone} if message["method"] == "tools/call"
+                tool = message["params"]["name"] if message["method"] == "tools/call" else None
+                if tool:
+                    called.append(tool)
+                if tool == "wisp_sealed" and seal_fails and seal_fails.exists():
+                    self.send_response(500)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                answer = None if tool == "wisp_zone" and down and down.exists() else zone
+                result = ({"content": [], "structuredContent": answer} if tool
                           else {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "wisp"}})
                 body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
                 self.send_response(200)
@@ -1010,6 +1129,77 @@ class Pin(HermesHome):
         rule = json.loads(self.hermes("sections").stdout)["wisp-routing"]
 
         self.assertIn("Wisp's services: Acme CRM (my-crm);", rule)
+
+    @sandboxed
+    def test_a_sandboxed_start_asks_the_runtime_once_to_replace_its_token(self):
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+
+        done = self.python("load_plugin()")
+
+        # On Linux the process before bubblewrap's re-exec asked for the zone too, and never got further.
+        self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+        self.assertEqual(self.called[-1], "wisp_sealed")
+        self.assertNotIn(UNPROTECTED, done.stderr)
+
+    @sandboxed
+    def test_the_plugin_loaded_again_in_a_sandboxed_process_never_asks_again_to_replace_the_token(self):
+        # A forced rediscovery loads the plugin again in the same process: nothing started.
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+
+        done = self.python("load_plugin(); load_plugin()")
+
+        self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+
+    @sandboxed
+    def test_a_load_from_the_cache_then_one_beside_a_live_runtime_asks_once_on_the_live_load(self):
+        down = self.tmp / "down"
+        down.touch()
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]), down=down)
+        (self.plugin / "zone.json").write_text(json.dumps(self.valid_zone([self.bank])))
+
+        done = self.python(f"load_plugin(); import os; os.remove({str(down)!r}); load_plugin()")
+
+        self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+        self.assertEqual(self.called[-1], "wisp_sealed")
+
+    @sandboxed
+    def test_a_load_whose_replacement_failed_asks_again_on_the_next_load(self):
+        fails = self.tmp / "seal-fails"
+        fails.touch()
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]), seal_fails=fails)
+
+        done = self.python(f"load_plugin(); import os; os.remove({str(fails)!r}); load_plugin()")
+
+        self.assertEqual(self.called.count("wisp_sealed"), 2, done.stderr)
+
+    def test_an_unsandboxed_start_never_asks_to_replace_the_token(self):
+        elsewhere = self.tmp / "elsewhere"
+        self.pin = {**self.pin, "dataDir": str(elsewhere), "deskRoot": str(elsewhere / "desks"), "privateFolders": []}
+        self.pin["url"] = self.endpoint({**self.pin, "services": []})
+
+        done = self.python("load_plugin()")
+
+        self.assertIn(UNPROTECTED, done.stderr)
+        self.assertEqual(self.called, ["wisp_zone"])
+
+    @sandboxed
+    def test_a_start_without_a_pin_never_asks_to_replace_the_token(self):
+        self.pin = None
+        self.repoint(self.endpoint(self.valid_zone([self.bank])))
+
+        self.python("load_plugin()")
+
+        self.assertNotIn("wisp_sealed", self.called)
+
+    @sandboxed
+    def test_a_start_on_the_cached_zone_never_asks_to_replace_the_token(self):
+        self.pin["url"] = self.endpoint(None)
+        (self.plugin / "zone.json").write_text(json.dumps(self.valid_zone([self.bank])))
+
+        done = self.python("load_plugin()")
+
+        self.assertNotIn(UNPROTECTED, done.stderr)
+        self.assertEqual(set(self.called), {"wisp_zone"})
 
     def malformed_zones(self):
         """What an answer or a cached zone can hold that no folder can be: (what, the zone)."""
@@ -1259,6 +1449,21 @@ except OSError:
                 self.assertEqual(done.stdout.split(), ["refused"], done.stderr)
                 self.assertIn(f"{UNPROTECTED}: {folder}", done.stderr)
 
+    @sandboxed
+    def test_a_pinned_folder_holding_a_folder_hermes_imports_from_is_left_out_saying_so(self):
+        # As a Hermes whose interpreter lies in one place and its packages, on `sys.path` only, in another.
+        environment = self.tmp / "environment"
+        packages = environment / "lib" / "site-packages"
+        packages.mkdir(parents=True)
+        (packages / "imported_late.py").write_text("")
+        self.fault_env["PYTHONPATH"] = str(packages)
+        self.pin["privateFolders"] = [{"path": str(self.bank)}, {"path": str(environment)}]
+
+        done = self.python(READ_THE_SECRETS.format(paths=[str(self.bank / "secret.txt")]) + "\nimport imported_late\nprint('imported')")
+
+        self.assertEqual(done.stdout.split(), ["refused", "imported"], done.stderr)
+        self.assertIn(f"{UNPROTECTED}: {environment} would take {packages}", done.stderr)
+
     def test_with_no_pin_an_answer_is_cached_as_it_came(self):
         # A second machine's: its Wisp may name folders in another machine's terms.
         self.pin = None
@@ -1458,6 +1663,42 @@ if sys.argv[1:3] == ["sandbox-exec", "--print-args"]:
         hermes = {**runs[2]["env"], **{options[i + 1]: options[i + 2] for i, arg in enumerate(options) if arg == "--setenv"}}
         self.assertEqual({name: hermes.get(name) for name in self.LOADER}, self.LOADER)
         self.assertEqual(argv[argv.index("--"):], ["--", "hermes"])
+
+
+@posix
+class LiveLoad(unittest.TestCase):
+    """The plugin enabled under a running gateway: its chats are open, each held in Hermes's registry by this PID,
+    which the supervisor keeps. `_reexec` up to its exec, against a `wisp` and a bubblewrap that start nothing."""
+
+    def test_the_chats_this_process_holds_are_released_before_it_becomes_the_supervisor(self):
+        spec = importlib.util.spec_from_file_location("wisp_sandbox_under_test", PLUGIN / "sandbox.py")
+        sandbox = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sandbox)
+        tmp = Path(tempfile.mkdtemp(prefix="wisp-hermes-live-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "wisp").write_text(f"#!{sys.executable}\nimport sys\nif '--print-args' in sys.argv: sys.stdout.write('--\\0hermes')\n")
+        # As bubblewrap: its child's PID on the info fd, then the child runs.
+        (tmp / "bwrap").write_text(f"#!{sys.executable}\nimport os, sys, time\n"
+                                   "os.write(int(sys.argv[2]), ('{\"child-pid\": %d}' % os.getpid()).encode())\ntime.sleep(30)\n")
+        for name in ("wisp", "bwrap"):
+            (tmp / name).chmod(0o755)
+        registry = tmp / "runtime" / "active_sessions.json"
+        registry.parent.mkdir()
+        registry.write_text(json.dumps({"entries": [{"lease_id": "mine", "pid": os.getpid()}, {"lease_id": "cli", "pid": 1}]}))
+        held = []
+
+        def execve(*_):
+            held.append([entry["lease_id"] for entry in json.loads(registry.read_text())["entries"]])
+            raise OSError("not in a test")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp)}), patch.object(sys, "path", [str(FAKE), *sys.path]), \
+                patch.dict(sys.modules), patch.object(sandbox, "BWRAP", str(tmp / "bwrap")), \
+                patch.object(sandbox, "_inherited_fds", list), patch.object(sandbox.os, "execve", execve):
+            for name in [n for n in sys.modules if n == "hermes_cli" or n.startswith("hermes_cli.")]:
+                del sys.modules[name]
+            sandbox._reexec(["/zone/a"], "/zone/plugin", str(tmp / "wisp"))
+
+        self.assertEqual(held, [["cli"]])
 
 
 class SandboxModule(unittest.TestCase):

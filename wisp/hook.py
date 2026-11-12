@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 REFUSAL = {"action": "block", "message": "This goes through Wisp — use ask_wisp."}
 FILE_TOOLS = {"read_file", "write_file", "patch", "search_files"}
 WRITE_TOOLS = {"write_file", "patch"}
+# Wisp's tools as Hermes's model calls them (`mcp__<server>__<tool>`).
+WISP_TOOLS = {"mcp__wisp__ask_wisp", "mcp__wisp__wisp_result"}
 # The argument that holds what a code tool runs.
 CODE_TOOLS = {"terminal": "command", "execute_code": "code"}
 # Between the words of a command, as a shell or a Python argv list (`["hermes", "plugins", ...]`) spells it.
@@ -19,7 +21,8 @@ _SEP = r"[\s'\",]+"
 # Bounded, so a long line repeating "hermes" stays linear: Hermes abandons a slow hook but cannot stop it.
 # ponytail: "hermes" anywhere on the line, so `git log --grep="hermes gateway install"` is refused too.
 # A restart passes: this plugin sandboxes Hermes at every start, and a plugin installed with new
-# dependencies loads only after one.
+# dependencies loads only after one. It is for Hermes's CLI or a terminal: inside a supervised gateway,
+# Hermes's own terminal guard refuses `hermes gateway restart` before this hook sees it.
 _SWITCH_OFF = re.compile(
     rf"\bhermes[^\n;|&]{{0,200}}?\b(plugins{_SEP}(disable|remove|rm|uninstall){_SEP}wisp"
     rf"|config{_SEP}(set|unset){_SEP}plugins|gateway{_SEP}install)\b")
@@ -59,15 +62,17 @@ def _moved_names(moved):
     return [name for name in moved if isinstance(name, str) and _SERVER_NAME.fullmatch(name)]
 
 
-def make_hook(zone, config_path, moved=()):
+def make_hook(zone, config_path, moved=(), unavailable=lambda: None):
     """The hook for `zone` (None: only the switch-off attempts are refused); `config_path` is Hermes's
     `config.yaml`, whose `plugins` section enables this plugin; `moved` names Hermes's MCP servers
-    switched off because Wisp holds them now."""
+    switched off because Wisp holds them now; `unavailable()`, asked at each refusal, what to refuse with
+    instead of `ask_wisp` while there is no Wisp to ask (None while Wisp is connected and answers)."""
     given = ([zone["dataDir"], zone["deskRoot"], *(f["path"] for f in zone.get("privateFolders") or []),
               *(zone.get("secretFiles") or [])] if zone else [])
     home = os.path.expanduser("~")
-    # zone.json is writable by Hermes's model: an empty, relative, root or home folder would refuse nearly
-    # every call, on every start the cache stands in for the Runtime.
+    # A sandboxed Hermes's model cannot write zone.json (macOS and Linux both deny it), but an unsandboxed one can
+    # (Windows, or a start the sandbox failed): an empty, relative, root or home folder would refuse nearly every
+    # call, on every start the cache stands in for the Runtime.
     kept = [folder for folder in given
             if os.path.isabs(os.path.expanduser(folder)) and _real(folder) not in (os.sep, _real(home))]
     if len(kept) < len(given):
@@ -97,6 +102,21 @@ def make_hook(zone, config_path, moved=()):
         return any(real == folder or real.startswith(folder + os.sep) for folder in among)
 
     def pre_tool_call(tool_name, args, **_):
+        # Wisp's own tools pass unless there is no Wisp to ask: a session keeps the tool list it started with, and
+        # Hermes would answer a call to a parked server's tool with an error saying nothing of Wisp.
+        wisps = tool_name in WISP_TOOLS
+        if not wisps and refused(tool_name, args) is None:
+            return None
+        try:
+            message = unavailable()
+        except Exception as exc:  # noqa: BLE001 — a refusal that raises would still block, naming nothing
+            logger.warning("Wisp: could not tell whether Wisp is there: %r", exc)
+            message = None
+        if message:
+            return {"action": "block", "message": message}
+        return None if wisps else REFUSAL
+
+    def refused(tool_name, args):
         if tool_name in FILE_TOOLS:
             path = args.get("path")
             if isinstance(path, str) and (inside(path, folders) or (

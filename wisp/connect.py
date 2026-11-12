@@ -25,6 +25,9 @@ OLD_CREDENTIAL_ENV = "WISP_CREDENTIAL"
 CALL_TIMEOUT = 1900
 TIMEOUT_KEYS = ("timeouts.tools.sequential_call", "timeouts.tools.concurrent_batch")
 SERVER_KEY = "mcp_servers.wisp"
+# Hermes's own commands fill Telegram's 60-slot menu first; the names this lists come before them, the user's after.
+MENU_KEY = "platforms.telegram.extra.command_menu.priority"
+MENU = ["wisp", "wisp_model"]
 # `hermes wisp` exists only once Hermes loads the plugin, and Hermes loads only an enabled one.
 ENABLE_HINT = ("The plugin is enabled by `hermes plugins install <repo> --enable` (or `hermes plugins enable wisp`); "
                "connect leaves plugins.enabled alone.")
@@ -80,10 +83,11 @@ def _hermes(*argv):
 
 def _read_credential():
     # getpass reads the terminal when there is one; a pipe (`wisp integrate hermes`) is read as is.
-    credential = getpass.getpass("Wisp credential: ") if sys.stdin.isatty() else sys.stdin.readline()
+    prompt = "Wisp Host Agent Credential (printed by `wisp tokens create --name hermes --host-agent`): "
+    credential = getpass.getpass(prompt) if sys.stdin.isatty() else sys.stdin.readline()
     credential = credential.strip()
     if not credential:
-        sys.exit("No credential given: paste the one `wisp tokens create --name <name> --host-agent` printed.")
+        sys.exit("No Host Agent Credential given: paste the one `wisp tokens create --name <name> --host-agent` printed.")
     return credential
 
 
@@ -99,9 +103,11 @@ def _check_url(url):
         return
     sys.exit(f"""Refusing {url}: the credential would cross the network in the clear.
 Wisp's Runtime listens on 127.0.0.1 only. Either put https in front of it on its machine
-(Tailscale Serve: `tailscale serve --bg <port>`, or Caddy as a reverse proxy) and connect to the https URL,
-or keep an ssh tunnel up as a service (`ssh -L <port>:127.0.0.1:<port> <runtime host>`, e.g. autossh under
-systemd or launchd) and connect to http://127.0.0.1:<port>/mcp.""")
+(Tailscale Serve: `tailscale serve --bg <port>`, or Caddy as a reverse proxy) and connect to the https URL;
+the Runtime refuses that https name until it is told it:
+`wisp tokens create --name hermes --host-agent --public-url https://<name>`.
+Or keep an ssh tunnel up as a service (`ssh -L <port>:127.0.0.1:<port> <runtime host>`, e.g. autossh
+under systemd or launchd) and connect to http://127.0.0.1:<port>/mcp.""")
 
 
 def _is_loopback(host):
@@ -140,6 +146,7 @@ def connect(url):
         current = _get(config, key)
         if not isinstance(current, (int, float)) or current < CALL_TIMEOUT:
             changes.append((key, CALL_TIMEOUT))
+    changes.append((MENU_KEY, MENU + _users_menu(config)))
 
     # What the timeouts held before the first connect, for --remove; a later connect keeps it.
     prior = _prior_path()
@@ -151,6 +158,13 @@ def connect(url):
     print(f"Set {CREDENTIAL_ENV} in {get_env_path()}")
     print(ENABLE_HINT)
     print(LIMITS)
+
+
+def _users_menu(config):
+    """The menu priority's names other than the plugin's (Hermes takes a single name for a list of one)."""
+    current = _get(config, MENU_KEY)
+    names = [current] if isinstance(current, str) else current if isinstance(current, list) else []
+    return [name for name in names if str(name).lower().replace("-", "_") not in MENU]
 
 
 def _prior_path():
@@ -174,6 +188,12 @@ def remove():
     # Hermes's model, which could plant a server there for --remove to install.
     if _get(config, SERVER_KEY) is not None:
         _hermes("config", "unset", SERVER_KEY)
+    if _get(config, MENU_KEY) is not None:
+        users = _users_menu(config)
+        if not users:
+            _hermes("config", "unset", MENU_KEY)
+        elif users != _get(config, MENU_KEY):
+            _hermes("config", "set", MENU_KEY, json.dumps(users))
     # Only the timeouts connect touches, and only numbers.
     for key in TIMEOUT_KEYS:
         if key not in prior:
@@ -194,9 +214,10 @@ def remove():
     prior_path.unlink(missing_ok=True)
     try:
         ZONE_CACHE.unlink(missing_ok=True)
-    except OSError as exc:
-        # Wisp's sandbox denies Hermes writes beside the plugin, so it cannot be altered from inside.
-        print(f"Could not delete the zone cache {ZONE_CACHE} ({exc.strerror}); delete it from outside Hermes")
+    except OSError:
+        # Wisp's sandbox denies Hermes writes beside the plugin; the file goes with the plugin's directory,
+        # which `wisp integrate hermes --remove` deletes from outside, so there is nothing to tell the user.
+        pass
 
 
 def _restorable(value):

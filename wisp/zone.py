@@ -1,5 +1,5 @@
-"""Wisp's zone and services, as `wisp_zone` answers them at Hermes's start, and the routing rule built
-from them."""
+"""Wisp's zone and services, as `wisp_zone` answers them at Hermes's start (the services again at each
+session's), and the routing rule built from them."""
 
 import json
 import logging
@@ -19,6 +19,8 @@ ZONE_CACHE = Path(__file__).resolve().parent / "zone.json"
 PIN = Path(__file__).resolve().parent / "pin.json"
 # Hermes drops a longer system prompt section whole (`plugins_dispatch.MAX_SYSTEM_PROMPT_SECTION_CHARS`).
 SECTION_CAP = 4000
+# A session's prompt waits on this read of the Connectors; past it, the cache answers.
+SESSION_TIMEOUT = 2.0
 # Two limits on an answer's folders, for time only, as no real zone nears them: a list that fails costs a probe per
 # folder, at about 57 ms each, and past 2 MB of paths (Linux's usual `ARG_MAX`) every probe of it fails with `E2BIG`. What
 # keeps the pinned folders closed is `pinned_zone` and `protect`'s fallback, not these. `ZONE_BYTES`, Linux's limit on one
@@ -35,12 +37,12 @@ def _cache(zone, cache):
         logger.warning("Wisp: could not cache the zone at %s: %s", cache, exc)
 
 
-def load_zone(url, credential, cache):
+def load_zone(url, credential, cache, timeout=5.0):
     """With no pin: the zone from the endpoint at `url`, written to `cache` as it came, as it may name another
     machine's folders; the cached one when the endpoint cannot answer; None when there is neither."""
     if url and credential:
         try:
-            zone = call_tool(url, credential, "wisp_zone")["structuredContent"]
+            zone = call_tool(url, credential, "wisp_zone", timeout=timeout)["structuredContent"]
             _cache(zone, cache)
             return zone
         except (OSError, McpError, ValueError, KeyError) as exc:
@@ -105,8 +107,9 @@ def widen(pin, answer):
 
 
 def pinned_zone(pin, credential, cache):
-    """The pinned zone, widened by the endpoint's answer, or else by the cached one. Everything read beyond the pin is
-    data: a failure of any kind means no answer, and only a well-formed answer is cached. Only a pin of the wrong shape raises."""
+    """The pinned zone, widened by the endpoint's answer, or else by the cached one, and whether the endpoint answered.
+    Everything read beyond the pin is data: a failure of any kind means no answer, and only a well-formed answer is
+    cached. Only a pin of the wrong shape raises."""
     def answered():
         token = credential()
         if not token:
@@ -123,10 +126,10 @@ def pinned_zone(pin, credential, cache):
 
     for read in (answered, cached):
         try:
-            return read()
+            return read(), read is answered
         except Exception as exc:  # noqa: BLE001 — a process on the pinned port, or in the cache, can make any of them
             logger.warning("Wisp: no zone %s (%r)", read.__name__, exc)
-    return widen(pin, None)
+    return widen(pin, None), False
 
 
 def _inert(text):
@@ -141,14 +144,92 @@ def _plainly(connector):
     return f"{shown}: {connector['description']}" if connector.get("description") else shown
 
 
-def routing_rule(zone):
-    """The system prompt section that sends Wisp's tasks to `ask_wisp`, within Hermes's section cap: what
-    does not fit is counted, not listed."""
+def not_connected(pinned):
+    """What the hook refuses with, and the rule says, while this profile names no Wisp endpoint or holds no
+    credential: there is no `ask_wisp`, so nothing may route to it. `pinned`: `wisp integrate hermes` put Wisp on
+    this machine, and it is the repair; else Wisp is on another machine, and `hermes wisp connect` is."""
+    return f"Wisp is not connected to Hermes: tell the user to run {_repair(pinned)} in a terminal, then restart Hermes."
+
+
+def _repair(pinned):
+    """The command that connects this profile to Wisp: see `not_connected`."""
+    return ("`wisp integrate hermes`" if pinned else
+            "`hermes wisp connect https://<host>/mcp` (with the credential `wisp tokens create --name <name> --host-agent` printed)")
+
+
+def not_connected_rule(pinned):
+    """The routing rule while Wisp is not connected."""
+    return f"""# Wisp
+Wisp is the user's private agent: it holds the keys to the user's sensitive accounts and reads their private
+files, and you cannot reach them. {not_connected(pinned)}
+Say so whenever the user asks for Wisp or for anything Wisp does, and do not do the task another way."""
+
+
+def not_answering():
+    """What the hook refuses with, and the rule says, while Wisp is connected but does not answer: its Runtime is
+    stopped or restarting, or its endpoint cannot be reached. `ask_wisp` comes back by itself once it answers."""
+    return ("Wisp is not answering right now (its Runtime is stopped or restarting, or its endpoint cannot be "
+            "reached): tell the user so, and that Wisp is usually back within a minute; do not do the task another way.")
+
+
+def rejected(pinned):
+    """What the hook refuses with, and the rule says, while Hermes has given up on the connected Wisp for good: Wisp
+    refused its credential (revoked or replaced) or the address is wrong, and no retry mends either."""
+    return (f"Wisp refused Hermes's credential, or cannot be reached at that address: tell the user to run "
+            f"{_repair(pinned)} again in a terminal, then restart Hermes; do not do the task another way.")
+
+
+def _reach(closed):
+    """What the rule says of Wisp's files: out of reach only when this process is `closed` off from them."""
+    return "you cannot reach them" if closed else "these are Wisp's to handle; this Hermes is not sandboxed from them"
+
+
+def down_rule(zone, down, closed):
+    """The routing rule while Wisp does not answer, `down` saying why: what is Wisp's, from `zone` when there is one."""
+    if zone:
+        return routing_rule(zone, down, closed=closed)
+    return f"""# Wisp
+Wisp is the user's private agent: it holds the keys to the user's sensitive accounts and reads their private
+files, and {_reach(closed)}. {down}
+Say so whenever the user asks for Wisp or for anything Wisp does."""
+
+
+def session_rule(zone, url, credential, cache, down, closed):
+    """The routing rule for a session starting now: `zone`'s folders as of Hermes's start (the sandbox closes a folder
+    only at a start, so a rule naming one added since would call closed a folder Hermes can still open) with the
+    Connectors the endpoint names now, or the cache's when it does not answer, or the start's. With Wisp `down`, the
+    endpoint is not asked."""
+    def answered():
+        if not (url and credential):
+            raise ValueError("no endpoint or credential")
+        return call_tool(url, credential, "wisp_zone", timeout=SESSION_TIMEOUT)["structuredContent"]
+
+    def cached():
+        return json.loads(cache.read_text())
+
+    folders = {key: value for key, value in zone.items() if key not in ("services", "connectors")}
+    for read in (answered, cached) if down is None else (cached,):
+        try:
+            answer = read()
+            return routing_rule({**folders, "services": answer.get("services") or [],
+                                 **({"connectors": answer["connectors"]} if "connectors" in answer else {})}, down,
+                                closed=closed)
+        except Exception as exc:  # noqa: BLE001 — anything read here is data; the start's rule stands in
+            logger.warning("Wisp: no Connectors %s (%r)", read.__name__, exc)
+    return routing_rule(zone, down, closed=closed)
+
+
+def routing_rule(zone, down=None, *, closed):
+    """The system prompt section that sends Wisp's tasks to `ask_wisp` (with Wisp `down`: names them as Wisp's and
+    says `down`, why Wisp does not answer), within Hermes's section cap: what does not fit is counted, not listed.
+    `closed`: this process is closed off from Wisp's files (sandboxed, or Wisp is on another machine)."""
+    send = ("""Hand these tasks to the `ask_wisp` tool instead of doing them
+yourself, and relay Wisp's answer; continue a Wisp conversation by passing its `conversation` id back to
+`ask_wisp`:""" if down is None else f"""{down}
+These tasks are Wisp's:""")
     head = f"""# Wisp
 Wisp is the user's private agent. It holds the keys to the user's sensitive accounts and reads their
-private files; you cannot reach them. Hand these tasks to the `ask_wisp` tool instead of doing them
-yourself, and relay Wisp's answer; continue a Wisp conversation by passing its `conversation` id back to
-`ask_wisp`:
+private files; {_reach(closed)}. {send}
 - anything that reads or changes a file in Wisp's data directory {_inert(zone["dataDir"])} or under its
 Desk root {_inert(zone["deskRoot"])};"""
     if "connectors" in zone:

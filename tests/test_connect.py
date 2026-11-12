@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 FAKE = Path(__file__).resolve().parent / "fake"
-PLUGIN = Path(__file__).resolve().parents[1]
+PLUGIN = Path(__file__).resolve().parents[1] / "wisp"
 CREDENTIAL = "wisp_hermes_s3cr3t-credential"
 URL = "https://wisp.example.ts.net/mcp"
 # Hermes loads the plugin, and so has `hermes wisp`, only once `plugins.enabled` lists it.
@@ -29,7 +29,7 @@ class ConnectDecides(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-"))
         self.addCleanup(shutil.rmtree, self.home)
         plugin = self.home / "plugins" / "wisp"
-        shutil.copytree(PLUGIN, plugin, ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
+        shutil.copytree(PLUGIN, plugin, ignore=shutil.ignore_patterns("__pycache__"))
         (self.home / "config.yaml").write_text(json.dumps(ENABLED))
         for patch in (mock.patch.dict(os.environ, HERMES_HOME=str(self.home)), mock.patch.dict(sys.modules),
                       mock.patch.object(sys, "path", [str(FAKE), *sys.path])):
@@ -58,6 +58,10 @@ class ConnectDecides(unittest.TestCase):
 
                 for recipe in ("Tailscale Serve", "Caddy", "ssh -L"):
                     self.assertIn(recipe, str(refused.exception))
+                # The Runtime refuses the https name it was never told: the refusal names telling it.
+                self.assertIn("tailscale serve --bg <port>", str(refused.exception))
+                self.assertIn("wisp tokens create --name hermes --host-agent --public-url https://<name>",
+                              str(refused.exception))
                 self.children.assert_not_called()
                 self.assertFalse((self.home / ".env").exists())
 
@@ -74,12 +78,39 @@ class ConnectDecides(unittest.TestCase):
                 self.assertNotIn(CREDENTIAL, json.dumps(argvs))
                 self.assertIn(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}", (self.home / ".env").read_text())
 
+    def test_asks_a_terminal_for_the_host_agent_credential_by_the_command_that_prints_it(self):
+        terminal = mock.Mock(isatty=lambda: True)
+        with mock.patch("sys.stdin", terminal), mock.patch("getpass.getpass", return_value=CREDENTIAL) as asked, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.plugin.connect(URL)
+
+        prompt = asked.call_args.args[0]
+        self.assertIn("Wisp Host Agent Credential", prompt)
+        self.assertIn("wisp tokens create --name hermes --host-agent", prompt)
+
+    def test_remove_says_nothing_of_a_zone_cache_its_sandbox_refuses_to_delete(self):
+        cache = self.home / "plugins" / "wisp" / "zone.json"
+        cache.write_text("{}")
+        unlink = Path.unlink
+
+        def refused(path, missing_ok=False):
+            if path.resolve() == cache.resolve():
+                raise PermissionError(1, "Operation not permitted", str(path))
+            unlink(path, missing_ok=missing_ok)
+
+        out = io.StringIO()
+        with mock.patch.object(Path, "unlink", refused), contextlib.redirect_stdout(out):
+            self.plugin.remove()
+
+        self.assertNotIn("zone", out.getvalue().lower())
+        self.assertTrue(cache.exists())
+
 
 class Connect(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="wisp-hermes-"))
         self.addCleanup(shutil.rmtree, self.home)
-        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__", ".git", "tests"))
+        shutil.copytree(PLUGIN, self.home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__"))
         self.write_config(ENABLED)
 
     def write_config(self, config):
@@ -125,6 +156,7 @@ class Connect(unittest.TestCase):
             ["config", "set", "mcp_servers.wisp", json.dumps(server)],
             ["config", "set", "timeouts.tools.sequential_call", "1900"],
             ["config", "set", "timeouts.tools.concurrent_batch", "1900"],
+            ["config", "set", "platforms.telegram.extra.command_menu.priority", '["wisp", "wisp_model"]'],
         ])
         self.assertIn(f"WISP_CREDENTIAL_TOKEN={CREDENTIAL}", (self.home / ".env").read_text())
         log = (self.home / "argv.log").read_text()
@@ -173,6 +205,23 @@ class Connect(unittest.TestCase):
         self.assertEqual(self.config(), start)
         self.assertEqual((self.home / ".env").read_text(), "OPENROUTER_API_KEY=sk-or-1\n")
         self.assertFalse((self.home / "plugins" / "wisp" / "zone.json").exists())
+
+    def test_connect_puts_both_commands_first_in_telegrams_menu(self):
+        # Hermes's own commands fill the menu's 60 slots; a command it lists by priority comes before them.
+        self.connect()
+
+        self.assertEqual(json.loads(self.hermes("telegram-menu").stdout), ["wisp", "wisp_model"])
+
+    def test_connect_keeps_the_users_menu_priority_after_its_own_and_remove_leaves_only_the_users(self):
+        start = {**ENABLED, "platforms": {"telegram": {"extra": {"command_menu": {"priority": ["help", "wisp"]}}}}}
+        self.write_config(start)
+
+        self.connect()
+        menu = self.config()["platforms"]["telegram"]["extra"]["command_menu"]["priority"]
+        self.assertEqual(menu, ["wisp", "wisp_model", "help"])
+        self.assertEqual(self.hermes("wisp", "connect", "--remove").returncode, 0)
+
+        self.assertEqual(self.config()["platforms"]["telegram"]["extra"]["command_menu"]["priority"], ["help"])
 
     def test_connect_keeps_a_longer_timeout_of_the_users(self):
         self.write_config({**ENABLED, "timeouts": {"tools": {"concurrent_batch": 3600}}})

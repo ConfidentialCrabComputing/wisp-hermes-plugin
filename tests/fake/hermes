@@ -11,17 +11,24 @@ every call, `FAKE_HERMES_CONFIG_PATH`/`FAKE_HERMES_ENV_PATH` one whose `config p
 names that file, and
 `FAKE_HERMES_REMOVE_FAILS` one whose `plugins remove` writes into the plugin and exits non-zero,
 `FAKE_HERMES_FAILS` (an argv joined by spaces) one that exits non-zero on that command. `hermes slash <name> [args]` (not Hermes's) runs a plugin slash command's handler
-and prints what it returns; its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
+looked up as the CLI does (the name as typed), `hermes message <name> [args]` (not Hermes's) as a gateway
+does for a message (`gateway/run_inbound_hooks.py`: the name with `_` made `-`), and prints what it
+returns, or "Unknown command /<name>" (`ctx.session_surface()` is `cli` for one, `telegram` for the other,
+and `ctx.ask_choice` logs to `$HERMES_HOME/choices.log` and picks the label `FAKE_HERMES_CHOICE`, tapped `FAKE_HERMES_CHOICE_AFTER` seconds later, only in the context a handler was called in: elsewhere, as on a new thread, it asks nobody); its `ctx.dispatch_tool` calls are logged to `$HERMES_HOME/tools.log` and
 answered, in order, from `$HERMES_HOME/tools.json` ({tool: [handler result, ...]}), as Hermes's registry
-would answer them (a JSON string)."""
+would answer them (a JSON string). `FAKE_HERMES_WISP_STATUS` makes it a Hermes that connects its MCP servers,
+with Hermes's MCP client (`tests/fake/tools`) loaded before the plugin and `wisp` in that status.
+`hermes telegram-menu` (not Hermes's) prints the plugin commands Telegram's menu lists ahead of Hermes's own."""
 
 import argparse
+import contextvars
 import importlib.util
 import json
 import os
 import shutil
 import signal
 import sys
+import time
 from pathlib import Path
 
 ARGV = sys.argv[1:]
@@ -41,6 +48,22 @@ HOME = Path(os.environ["HERMES_HOME"])
 # Where `hermes plugins install` (or `wisp integrate hermes`) lays the plugin out.
 PLUGIN = HOME / "plugins" / "wisp"
 CONFIG = HOME / "config.yaml"
+# `ctx.session_surface()`: the classic CLI for `slash`, Telegram for `message`, "" outside a session.
+SURFACE = ""
+# Who `ctx.ask_choice` asks: as Hermes's, bound in a ContextVar around a command handler's call, so a thread the
+# handler starts (a new thread's context is empty) has no one to ask.
+ASKER = contextvars.ContextVar("asker", default=False)
+
+
+def in_chat(handler):
+    """`handler`, called with the asker bound."""
+    def call(raw_args):
+        token = ASKER.set(True)
+        try:
+            return handler(raw_args)
+        finally:
+            ASKER.reset(token)
+    return call
 
 
 def config():
@@ -96,6 +119,7 @@ class Ctx:
     def __init__(self):
         self.cli_commands = {}
         self.commands = {}
+        self.hints = {}
         self.sections = {}
         self.hooks = {}
 
@@ -106,7 +130,10 @@ class Ctx:
         self.sections[id] = content
 
     def register_command(self, name, handler, description="", args_hint="", argument_mode=None):
-        self.commands[name] = handler
+        # As Hermes's `register_command` keeps it.
+        key = name.lower().strip().lstrip("/").replace(" ", "-")
+        self.commands[key] = in_chat(handler)
+        self.hints[key] = args_hint
 
     def dispatch_tool(self, tool_name, args, **kwargs):
         with open(HOME / "tools.log", "a") as log:
@@ -118,6 +145,24 @@ class Ctx:
 
     def register_hook(self, hook_name, callback, *, hold_stream=False):
         self.hooks.setdefault(hook_name, []).append(callback)
+
+    def session_surface(self):
+        return SURFACE
+
+    def ask_choice(self, question, choices):
+        # As Hermes's `plugin_choices.ask_choice`: the user taps a label (`FAKE_HERMES_CHOICE`; unset, nobody
+        # answers), and the value of the choice it names comes back. Without the handler's context nobody is asked.
+        if not ASKER.get():
+            return None
+        with open(HOME / "choices.log", "a") as log:
+            log.write(json.dumps([question, choices]) + "\n")
+        time.sleep(float(os.environ.get("FAKE_HERMES_CHOICE_AFTER", 0)))
+        typed = os.environ.get("FAKE_HERMES_CHOICE", "").strip().casefold()
+        for choice in choices:
+            value, label = (choice, choice) if isinstance(choice, str) else (choice["value"], choice.get("label") or choice["value"])
+            if typed and typed in (str(value).casefold(), str(label).casefold()):
+                return value
+        return None
 
 
 def pre_tool_call(ctx, tool_name, args):
@@ -140,7 +185,10 @@ def load_plugin():
     # Hermes loads a user plugin only when `plugins.enabled` lists it (`plugins_discovery.gate_manifest`).
     if "wisp" not in ((config().get("plugins") or {}).get("enabled") or []):
         return ctx
-    spec = importlib.util.spec_from_file_location(
+    if os.environ.get("FAKE_HERMES_WISP_STATUS"):
+        # A Hermes that connects its MCP servers (a chat, a gateway) has its MCP client loaded by then.
+        import tools.mcp_tool_discovery  # noqa: F401
+    spec =importlib.util.spec_from_file_location(
         "hermes_plugins_wisp", PLUGIN / "__init__.py", submodule_search_locations=[str(PLUGIN)])
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -268,11 +316,37 @@ def main(argv):
         config_unset(argv[2])
     elif argv[:2] == ["config", "get"] and argv[3:] == ["--json"]:
         config_get(argv[2])
-    elif argv[:1] == ["slash"] and len(argv) in (2, 3):
-        print(load_plugin().commands[argv[1]](argv[2] if len(argv) == 3 else ""))
+    elif argv[:1] in (["slash"], ["message"]) and len(argv) in (2, 3):
+        name = argv[1] if argv[0] == "slash" else argv[1].replace("_", "-")
+        global SURFACE
+        SURFACE = "cli" if argv[0] == "slash" else "telegram"
+        handler = load_plugin().commands.get(name)
+        print(handler(argv[2] if len(argv) == 3 else "") if handler else f"Unknown command /{argv[1]}")
     elif argv == ["sections"]:
-        # Not Hermes's: the system prompt sections a new session would get.
-        print(json.dumps(load_plugin().sections))
+        # Not Hermes's: the system prompt sections a new session would get, rendered as Hermes renders them
+        # (`plugins_dispatch._render_prompt_section_text`): a callable gets the session's info, and a section
+        # that raises, is no string or is blank is left out.
+        rendered = {}
+        for id, content in load_plugin().sections.items():
+            try:
+                text = content({}) if callable(content) else content
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(text, str) and text.strip():
+                rendered[id] = text.strip()
+        print(json.dumps(rendered))
+    elif argv == ["telegram-menu"]:
+        # Not Hermes's: the plugin commands Hermes 0.23.1's Telegram menu puts ahead of its own (and of its 60-slot cap),
+        # as `commands_platforms.telegram_menu_commands` does: those `platforms.telegram.extra.command_menu.priority`
+        # names (lowercased, `-` made `_`), in its order; a command whose hint starts with `<` is never in the menu.
+        ctx = load_plugin()
+        menu = {name.replace("-", "_"): hint for name, hint in ctx.hints.items()}
+        node = config()
+        for key in ("platforms", "telegram", "extra", "command_menu", "priority"):
+            node = node.get(key) if isinstance(node, dict) else None
+        names = [node] if isinstance(node, str) else node if isinstance(node, list) else []
+        print(json.dumps([name for name in (str(n).lower().replace("-", "_") for n in names)
+                          if name in menu and not menu[name].strip().startswith("<")]))
     elif argv == ["pre-tool-call"]:
         # Not Hermes's: each `[tool_name, args]` of the JSON list on stdin, through the plugin's
         # `pre_tool_call` hooks; prints the block message of each, null when it proceeds.
@@ -283,8 +357,9 @@ def main(argv):
         load_plugin()
         signal.pause()
     elif argv[:1] == ["python"] and len(argv) == 2:
-        # Not Hermes's: Python run in this process, which loads the plugin by calling `load_plugin()`.
-        exec(argv[1], {"load_plugin": load_plugin})
+        # Not Hermes's: Python run in this process, which loads the plugin by calling `load_plugin()` and runs its
+        # hooks with `pre_tool_call(ctx, tool_name, args)`.
+        exec(argv[1], {"load_plugin": load_plugin, "pre_tool_call": pre_tool_call})
     else:
         plugin_command(argv)
 

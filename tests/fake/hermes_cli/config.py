@@ -34,14 +34,18 @@ def _env_lines() -> list:
         return []
 
 
+def load_env() -> dict:
+    return dict(line.partition("=")[::2] for line in _env_lines() if "=" in line)
+
+
 def get_env_value(key: str):
     if os.environ.get("FAKE_HERMES_ENV_VALUE_RAISES") == "1":
         raise ValueError(".env: unreadable")
-    for line in _env_lines():
-        name, _, value = line.partition("=")
-        if name == key:
-            return value
-    return None
+    # As Hermes's with multiplexing on and no profile scope: raised before the key is looked up, set or not.
+    if os.environ.get("FAKE_HERMES_ENV_VALUE_UNSCOPED") == "1":
+        from agent.secret_scope import UnscopedSecretError
+        raise UnscopedSecretError(key)
+    return load_env().get(key)
 
 
 def _locked(key: str):
