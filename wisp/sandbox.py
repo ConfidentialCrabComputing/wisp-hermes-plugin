@@ -340,13 +340,11 @@ def apply(denied, plugin_dir, wisp):
             if _sandboxed([], plugin_dir):
                 _without_chromes_sandbox()
             return problem
-        libc = ctypes.CDLL(None)
         # A second `sandbox_init` with another profile fails, and says so on stderr: inside one, only what reaches the zone
         # (`protect` checks) is worth a line.
-        libc.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-        if libc.sandbox_check(os.getpid(), None, 0) == 1:
+        if _in_a_sandbox():
             return SANDBOXED_ALREADY
-        sandbox_init = libc.sandbox_init
+        sandbox_init = ctypes.CDLL(None).sandbox_init
         sandbox_init.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_char_p)]
         error = ctypes.c_char_p()
         if sandbox_init(profile(denied, plugin_dir).encode(), 0, ctypes.byref(error)) != 0:
@@ -355,6 +353,13 @@ def apply(denied, plugin_dir, wisp):
         return f"the sandbox could not start: {exc!r}"
     _without_chromes_sandbox()
     return None
+
+
+def _in_a_sandbox():
+    """macOS: whether this process runs in a sandbox already."""
+    libc = ctypes.CDLL(None)
+    libc.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    return libc.sandbox_check(os.getpid(), None, 0) == 1
 
 
 def _manages_the_service(argv):
@@ -541,7 +546,9 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None, sandboxed_lat
             warnings.append(f"{UNPROTECTED}: {folder} would take {root} from Hermes's start, so it is not sandboxed")
         else:
             denied.append(folder)
-    if (sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and not _in_its_gateway()
+    # Inside a sandbox already (a sandboxed Hermes's dashboard or terminal tool) launchd refuses the service whatever this
+    # does, and a gateway it runs here is in that sandbox: checked below as any other load inside one.
+    if (sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and not _in_its_gateway() and not _in_a_sandbox()
             # A folder left out above stays out of that gateway's sandbox too: it is not told it is closed.
             and _sandbox_its_gateway(denied, plugin, wisp, None if warnings else sandboxed_later)):
         return [*warnings, f"{SERVICE_COMMAND}: launchd refuses to load it from a sandboxed process"]

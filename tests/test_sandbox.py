@@ -1304,6 +1304,25 @@ print(section(ctx, "wisp-routing", "s1"))""", wrap=("env", f"FAKE_HERMES_PROBE={
         self.assertIn("you cannot reach them", done.stdout)
 
     @macos
+    def test_the_gateway_a_service_command_runs_inside_the_sandbox_runs_the_browser_without_chromes_own_sandbox(self):
+        # A gateway restarted from a sandboxed Hermes's dashboard, with no service installed: it runs in that process.
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+        restart = ('import sys\nsys.argv[1:] = ["gateway", "restart", "--all"]\nctx = load_plugin()\n'
+                   'from hermes_cli import gateway\ngateway.run_gateway(replace=True)\n'
+                   'from tools import browser_launcher\nprint(browser_launcher.needs_chromium_sandbox_bypass())\n'
+                   'print(section(ctx, "wisp-routing", "s1"))')
+        done = self.python(f"""
+import os, subprocess, sys
+load_plugin()
+subprocess.run([sys.executable, {str(FAKE / "hermes")!r}, "python", {restart!r}], env=os.environ, check=True)""",
+                           wrap=("env", f"FAKE_HERMES_PROBE={self.bank / 'secret.txt'}"))
+
+        self.assertIn("gateway: refused\nTrue\n", done.stdout, done.stderr)
+        self.assertIn("you cannot reach them", done.stdout)
+        self.assertNotIn(UNPROTECTED, done.stderr)
+        self.assertEqual(self.called.count("wisp_sealed"), 2, done.stderr)
+
+    @macos
     def test_the_gateway_a_service_command_runs_with_a_folder_left_out_is_not_told_it_is_closed(self):
         # A Private Folder holding Hermes's home is left out of the sandbox, as at any other start.
         self.pin["url"] = self.endpoint(self.valid_zone([self.bank, self.tmp]))
