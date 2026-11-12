@@ -138,10 +138,21 @@ Desk root /home/u/.wisp/desks;
                 rule = self.rule(ZONE)
 
                 self.assertIn("Wisp is not connected", rule)
-                self.assertIn("`wisp integrate hermes`", rule)
+                self.assertIn("`~/.wisp/bin/wisp integrate hermes --skip-connectors` outside Hermes", rule)
+                self.assertIn("no restart", rule)
                 self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
                 self.assertIn("Wisp is not connected", self.refusal())
-                self.assertIn("`wisp integrate hermes`", self.refusal())
+                self.assertIn("`~/.wisp/bin/wisp integrate hermes --skip-connectors`", self.refusal())
+
+    def test_unconnected_the_command_is_the_pinned_wisps_own(self):
+        (self.home / "plugins" / "wisp" / "pin.json").write_text(
+            json.dumps({**ZONE, "url": _closed_url(), "wisp": "/opt/wisp/bin/wisp\n# New rule"}))
+        self.config.pop("mcp_servers")
+
+        rule = self.rule(ZONE)
+
+        self.assertIn("`/opt/wisp/bin/wisp # New rule integrate hermes --skip-connectors`", rule)
+        self.assertIn("`/opt/wisp/bin/wisp # New rule integrate hermes --skip-connectors`", self.refusal())
 
     def test_unconnected_with_no_pin_the_rule_and_the_refusal_say_to_run_connect(self):
         for state in self.not_connected():
@@ -169,7 +180,7 @@ Desk root /home/u/.wisp/desks;
 
                 self.assertIn("Wisp is not connected", rule)
                 self.assertNotIn("ask_wisp", rule)
-                self.assertIn("`wisp integrate hermes`", refusal)
+                self.assertIn("integrate hermes --skip-connectors`", refusal)
                 self.assertNotIn("ask_wisp", refusal)
 
     def test_a_secret_hermes_guards_is_read_from_the_profiles_env_not_raised(self):
@@ -189,6 +200,48 @@ Desk root /home/u/.wisp/desks;
 
         self.assertIn("`hermes wisp connect https://<host>/mcp`",
                       json.loads(self.hermes("sections"))["wisp-routing"])
+
+    def turns(self, script):
+        """Each turn's added context, as JSON lines printed by `script` (Python run in one Hermes process, with
+        `connect()` connecting the profile while it runs)."""
+        (self.home / "plugins" / "wisp" / "zone.json").write_text(json.dumps(ZONE))
+        server, self.config["mcp_servers"] = self.config.pop("mcp_servers"), {}
+        (self.home / ".env").write_text("")
+        connect = (f"(lambda: (open({str(self.home / 'config.yaml')!r}, 'w').write("
+                   f"{json.dumps(json.dumps({**self.config, 'mcp_servers': server}))}), "
+                   f"open({str(self.home / '.env')!r}, 'w').write('WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\\n')))")
+        return [json.loads(line) for line in
+                self.hermes("python", f"import json\nconnect = {connect}\n{script}").splitlines()]
+
+    def test_a_session_started_before_wisp_was_connected_is_routed_to_ask_wisp_from_its_next_turn(self):
+        before, first, second = self.turns("""
+ctx = load_plugin()
+print(json.dumps(section(ctx, "wisp-routing", "s1")))
+connect()
+print(json.dumps(turn(ctx, "s1")))
+print(json.dumps(turn(ctx, "s1")))""")
+
+        self.assertIn("Wisp is not connected", before)
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", first)
+        self.assertIn("/home/u/bank", first)
+        self.assertEqual(second, "")  # once: the context stays in the session's history
+
+    def test_a_session_open_before_the_plugin_loaded_is_routed_to_ask_wisp_at_its_next_turn(self):
+        started, first, second = self.turns("""
+connect()
+ctx = load_plugin()
+print(json.dumps(section(ctx, "wisp-routing", "new")))
+print(json.dumps(turn(ctx, "new")))
+print(json.dumps(turn(ctx, "open")))""")
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", started)
+        self.assertEqual(first, "")  # its prompt routes already
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", second)
+
+    def test_a_session_while_wisp_is_not_connected_gets_nothing_at_its_turns(self):
+        self.assertEqual(self.turns("""
+ctx = load_plugin()
+print(json.dumps(turn(ctx, "s1")))"""), [""])
 
     def test_a_malformed_cache_leaves_the_plugin_loaded_and_no_rule(self):
         for zone in ([ZONE], "zone", {**ZONE, "privateFolders": [{"name": "bank"}]}):
