@@ -3,6 +3,10 @@
 
 import os
 import signal
+import threading
+
+# What the gateway loads as it starts, on a thread of its own: a served profile's plugins, put here by the fake `hermes`.
+served = []
 
 
 def probe():
@@ -16,6 +20,10 @@ def probe():
 
 def run_gateway(verbose=0, quiet=False, replace=False, force=False, idle_exit=False):
     """With `FAKE_HERMES_PROBE`, says whether the gateway reads it, and stops; else waits for its signals."""
+    for load in served:
+        loading = threading.Thread(target=load)
+        loading.start()
+        loading.join()
     if os.environ.get("FAKE_HERMES_PROBE"):
         print(f"gateway: {probe()}")
         return

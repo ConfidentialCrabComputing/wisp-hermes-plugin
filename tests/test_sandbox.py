@@ -438,6 +438,14 @@ print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARG
         self.assertEqual(said[-2:], ["gateway:", "refused"])
         self.assertNotIn(UNPROTECTED, stderr)
 
+    @macos
+    def test_a_plugin_the_gateway_of_a_service_command_loads_as_it_starts_sandboxes_it(self):
+        # A served profile's plugins, under a gateway whose own profile has none: the service command was asked already.
+        said, stderr = self.probe("gateway", "restart", "--all", FAKE_HERMES_NO_SERVICE="1", FAKE_HERMES_SERVED="1")
+
+        self.assertEqual(said, ["service:", "read", "gateway:", "refused"])
+        self.assertNotIn(UNPROTECTED, stderr)
+
     @linux
     @sandboxed
     def test_the_mark_a_model_could_leave_in_hermess_env_file_does_not_stop_the_sandbox(self):

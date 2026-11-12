@@ -15,6 +15,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 
 UNPROTECTED = "Wisp's zone is unprotected"
 SERVICE_COMMAND = "Hermes manages its gateway service unsandboxed"
@@ -358,6 +359,19 @@ def _manages_the_service(argv):
     return argv[:1] == ["gateway"] and argv[1:2] in ([verb] for verb in SERVICE_VERBS)
 
 
+def _in_its_gateway():
+    """Whether the gateway a service command runs in its own process has started: `run_gateway` is on the main thread's
+    stack, where its event loop runs, whichever thread loads a plugin (a served profile's, a reload). A load then takes
+    the sandbox as any gateway's does. ponytail: found by Hermes's name for it; a Hermes that renames it leaves such a
+    load unsandboxed, with the service command's warning."""
+    frame = sys._current_frames().get(threading.main_thread().ident)
+    while frame is not None:
+        if frame.f_code.co_name == "run_gateway" and os.path.basename(frame.f_code.co_filename) == "gateway.py":
+            return True
+        frame = frame.f_back
+    return False
+
+
 def _sandbox_its_gateway(denied, plugin_dir, wisp):
     """Has the gateway a service command runs in its own process (Hermes's fallback with no service installed) sandboxed
     before it starts; False when this Hermes has no `run_gateway` to wrap. Every other gateway is a process of its own,
@@ -518,7 +532,8 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
             warnings.append(f"{UNPROTECTED}: {folder} would take {root} from Hermes's start, so it is not sandboxed")
         else:
             denied.append(folder)
-    if sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and _sandbox_its_gateway(denied, plugin, wisp):
+    if (sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and not _in_its_gateway()
+            and _sandbox_its_gateway(denied, plugin, wisp)):
         return [*warnings, f"{SERVICE_COMMAND}: launchd refuses to load it from a sandboxed process"]
     kept = set(map(os.path.realpath, _zone_folders(pinned or zone)))
     held = [folder for folder in denied if folder in kept]
