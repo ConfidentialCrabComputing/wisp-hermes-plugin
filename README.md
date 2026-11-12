@@ -186,7 +186,9 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
   Hermes's model saw before the sandbox stops working. A Hermes process still running unsandboxed (a CLI open since
   before `wisp integrate hermes`) can read the new token as well, until it stops.
 - On macOS, `hermes gateway start`, `stop`, `restart`, `install` and `uninstall` run without Wisp's sandbox: launchd
-  refuses to load the gateway's service from a sandboxed process. They run no model and no tool; the gateway they
+  refuses to load the gateway's service from a sandboxed process. They run no model, but they run what Hermes's
+  environment names, the profile's `.env` included, which the sandboxed model can write: a `PATH`, `PYTHONPATH` or
+  `DYLD_*` set there runs outside the sandbox at the next such command, as in any unsandboxed process. The gateway they
   start is sandboxed at its own start, and one a `restart` runs in its own process (no service installed) is sandboxed
   before it starts.
 - Under Wisp's sandbox, Hermes's browser runs without Chrome's own sandbox: Chrome's cannot start inside Wisp's, so the
