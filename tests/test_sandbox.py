@@ -1900,14 +1900,15 @@ class TerminalWarning(unittest.TestCase):
 @sandboxed
 class Supervisor(HermesHome):
     """The process Hermes was started as, once the sandboxed Hermes runs: `HANDLERS` make a Hermes that says each
-    signal it gets on stdout and exits 7 on `SIGTERM`."""
+    signal it gets on stdout and exits 7 on `SIGTERM`. With `os.write`: a `print` in a handler that comes while
+    the main thread is still flushing its own raises `RuntimeError: reentrant call`, and that Hermes exits 1."""
 
     HANDLERS = """
 import os, signal, sys
 load_plugin()
 for s in (signal.SIGINT, signal.SIGQUIT, signal.SIGHUP, signal.SIGUSR1, signal.SIGUSR2):
-    signal.signal(s, lambda n, _: print(signal.Signals(n).name, flush=True))
-signal.signal(signal.SIGTERM, lambda n, _: (print("SIGTERM", flush=True), os._exit(7)))
+    signal.signal(s, lambda n, _: os.write(1, f"{signal.Signals(n).name}\\n".encode()))
+signal.signal(signal.SIGTERM, lambda n, _: (os.write(1, b"SIGTERM\\n"), os._exit(7)))
 """
     SERVE = """
 print("up", os.getpid(), flush=True)
