@@ -103,8 +103,8 @@ Hermes does not read `~/.wisp` or `~/.config/wisp` itself, not even while a step
    The turn that ran the command is lost to the reload, so Hermes answers the chat's next message with "⏸️ This
    conversation is paused … Send /discard …". The user sends `/discard`, then checks the result with a Wisp task.
 
-No `/new` follows: the chat that asked for the install hands Wisp's tasks to `ask_wisp` from its next message, as every
-session open then does. Hermes can check with `hermes mcp test wisp`, and read the log to say how `integrate` ended. In
+No `/new` follows: the chat that asked for the install hands Wisp's tasks to `ask_wisp` from its first message after
+Hermes has connected `wisp`, as every session open then does (a CLI chat connects it at `/reload-mcp`). Hermes can check with `hermes mcp test wisp`, and read the log to say how `integrate` ended. In
 Telegram, `/wisp` and `/wisp_model` work typed at once, but reach the command menu only after one `/restart` (and a
 reopened chat): `connect` sets the menu's priority after the reload has registered the menu. Hermes asks the user to
 send `/restart` in the chat for that, if the chat stays locked, or on macOS. `hermes gateway restart` is for a terminal:

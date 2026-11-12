@@ -230,30 +230,47 @@ def register(ctx):
         if not protected and pinned:
             _warn(f"{UNPROTECTED}: the pin or the zone is malformed, so Hermes is not sandboxed")
 
+    def has_tools():
+        """Whether Hermes lists `ask_wisp` now: it connected `wisp`, or registered a lazy one's tools from its cache, or
+        has no MCP client to say. A server configured since connects at a gateway's next reconcile, in a CLI only at
+        `/reload-mcp`. Unsure is not yet: a later turn asks again."""
+        try:
+            discovery = sys.modules.get("tools.mcp_tool_discovery")
+            if discovery is None:
+                return True
+            entry = (read_raw_config().get("mcp_servers") or {}).get("wisp") or {}
+            return any(status.get("name") == "wisp" and status.get("status") in ("connected", "lazy")
+                       for status in discovery.get_mcp_status({"wisp": entry}))
+        except Exception as exc:  # noqa: BLE001 — unsure is not yet
+            logger.debug("Wisp: could not tell whether Hermes lists ask_wisp: %r", exc)
+            return False
+
     def section(session):
         """Rendered into each new session's prompt, so it says the state Wisp is in then; blank, Hermes leaves it out."""
-        text = rule_now()
-        if text and not unavailable():
+        text, routes = rule_now()
+        if routes and has_tools():
             routed.add(session.get("session_id"))
         return text
 
     def turn(session_id=None, **_):
         """At each turn: the rule as of now for a session whose prompt has no connected rule (it started before this
-        load, or while Wisp was not connected or not answering) once Wisp answers; once per session, as the context
-        stays in its history. Hermes fixes a session's prompt section at its start, so only a turn can tell it.
+        load, or while Wisp was not connected, not answering or not listed yet) once Hermes lists `ask_wisp` and Wisp
+        answers; once per session, as the context stays in its history. Hermes fixes a session's prompt section at its
+        start, so only a turn can tell it.
         ponytail: a session id Hermes rotates on compression, or a process restarted under an open session, gets the
         rule once more."""
-        if session_id in routed or unavailable():
+        if session_id in routed or not has_tools():
             return None
-        text = rule_now()
-        if not text:
+        text, routes = rule_now()
+        if not routes:
             return None
         routed.add(session_id)
         return {"context": f"Wisp is connected and answering now; this rule replaces any earlier one about Wisp:\n{text}"}
 
     def rule_now():
+        """The rule as of now, and whether it routes to `ask_wisp` (Wisp connected and answering)."""
         if unconnected():
-            return not_connected_rule(pinned)
+            return not_connected_rule(pinned), False
         why = down()
         if zone is None and not pinned:
             # No zone at the load (connected since, or Wisp down then): asked again for each session, at the URL as of
@@ -264,20 +281,22 @@ def register(ctx):
                 # With Wisp down, the cache alone: the endpoint is not asked.
                 now = load_zone(None if why else url, credential(), ZONE_CACHE, SESSION_TIMEOUT)
                 if now is None:
-                    return down_rule(None, why or not_answering(), closed(url)) if url else ""
-                return down_rule(now, why, closed(url)) if why else routing_rule(now, closed=closed(url))
+                    return (down_rule(None, why or not_answering(), closed(url)) if url else ""), False
+                if why:
+                    return down_rule(now, why, closed(url)), False
+                return routing_rule(now, closed=closed(url)), True
             except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, as at a load
                 logger.warning("Wisp: no routing rule, the zone is malformed: %r", exc)
-                return ""
+                return "", False
         if not rule:
-            return down_rule(None, why, start_closed) if why else rule
+            return (down_rule(None, why, start_closed) if why else rule), False
         try:
             # The Connectors as of now: `wisp connectors auth` while Hermes runs needs no restart.
             url = pin["url"] if pin else ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
-            return session_rule(zone, url, credential(), ZONE_CACHE, why, start_closed)
+            return session_rule(zone, url, credential(), ZONE_CACHE, why, start_closed), not why
         except Exception as exc:  # noqa: BLE001 — the start's rule then, one that raises Hermes skips
             logger.warning("Wisp: could not read the Connectors as of now: %r", exc)
-            return down_rule(zone, why, start_closed) if why else rule
+            return (down_rule(zone, why, start_closed) if why else rule), not why
 
     ctx.register_system_prompt_section("wisp-routing", section)
     ctx.register_hook("pre_llm_call", turn)

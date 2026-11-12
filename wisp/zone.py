@@ -151,7 +151,7 @@ def not_connected(pinned):
     machine, and `hermes wisp connect` is."""
     if pinned:
         return (f"Wisp is not connected to Hermes: tell the user to run {_repair(pinned)} outside Hermes, in a terminal; "
-                "no restart: the running Hermes takes the connection at its next turn.")
+                "no restart: a running gateway takes the connection on its own, a CLI chat at `/reload-mcp`.")
     return f"Wisp is not connected to Hermes: tell the user to run {_repair(pinned)} in a terminal, then restart Hermes."
 
 
