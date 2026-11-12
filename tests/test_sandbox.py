@@ -390,6 +390,13 @@ print(json.dumps(sandbox.protect({second_zone!r}, {str(second_plugin)!r}, {str(s
         self.assertEqual(len(warnings), 1, warnings)
         self.assertIn(UNPROTECTED, warnings[0])
         self.assertIn(str(other_plugin), warnings[0])
+        # Its folder read-only, a file in it still takes writes.
+        (other_plugin / "__init__.py").write_text("")
+        other_plugin.chmod(0o555)
+        self.addCleanup(other_plugin.chmod, 0o755)
+        warnings, _ = self.protect_twice(self.zone, other_plugin)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(str(other_plugin), warnings[0])
 
     @macos
     def test_a_failed_sandbox_start_leaves_chromes_own_sandbox_on(self):

@@ -503,7 +503,10 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
     open_folders = [folder for folder in denied if folder not in left and _reads(folder, denied)]
     # macOS, in a sandbox already (another load in this process, or a sandboxed parent): what this process can reach is the
     # warning, not the `sandbox_init` that could not tighten it. ponytail: a folder empty or not there yet reads as closed.
-    writable = failed == SANDBOXED_ALREADY and os.access(plugin, os.W_OK)
+    # The folder and each file in it: a folder's mode alone leaves its files' own.
+    writable = failed == SANDBOXED_ALREADY and any(
+        os.access(path, os.W_OK) for path in [plugin, *(os.path.join(top, name) for top, dirs, files in os.walk(plugin)
+                                                        for name in [*dirs, *files])])
     if open_folders or writable:
         reached = ([f"read {', '.join(open_folders)}"] if open_folders else []) + ([f"write {plugin}"] if writable else [])
         warnings.append(f"{UNPROTECTED}: Hermes can {' and '.join(reached)}" + (f" ({failed})" if failed else ""))
