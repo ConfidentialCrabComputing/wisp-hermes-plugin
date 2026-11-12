@@ -1872,6 +1872,19 @@ print(sandbox._has_terminal())"""], start_new_session=True, capture_output=True,
 
         self.assertEqual(done.stdout.strip(), "False")
 
+    def test_a_folder_holding_only_the_way_to_a_denied_one_deeper_inside_is_not_read(self):
+        # What a tmpfs over `outer` holds once bubblewrap has made the mount point of a denied folder two levels in.
+        outer = Path(os.path.realpath(tempfile.mkdtemp(prefix="wisp-hermes-reads-")))
+        self.addCleanup(shutil.rmtree, outer)
+        inner = outer / "finance" / "taxes"
+        inner.mkdir(parents=True)
+        denied = [str(outer), str(inner)]
+
+        self.assertFalse(self.sandbox._reads(str(outer), denied))
+
+        (outer / "finance" / "report.txt").write_text("left in reach")
+        self.assertTrue(self.sandbox._reads(str(outer), denied))
+
 
 class TerminalWarning(unittest.TestCase):
     """What the kernel's `dev.tty.legacy_tiocsti` says of `TIOCSTI`, from a stand-in for its file."""
