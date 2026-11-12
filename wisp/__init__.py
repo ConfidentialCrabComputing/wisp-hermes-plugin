@@ -88,6 +88,11 @@ def register(ctx):
     refusal = getattr(revival, "refusal", None) or [None]
     # Whether this process had the Runtime replace its agent token, kept on the same thread for the same reason.
     sealed = getattr(revival, "sealed", False)
+    # The ids of the sessions this process gave a connected rule, at their start or a turn, kept on the same thread so a
+    # reload does not give them it again.
+    routed = getattr(revival, "routed", None)
+    if routed is None:
+        routed = set()
 
     def hermes_wisp():
         """Hermes's MCP client's view of `wisp`: None while it answers (or with no client loaded: only a Hermes that
@@ -187,6 +192,7 @@ def register(ctx):
         if pin is not None:
             # Pinned, the URL is integrate's (Hermes's model can repoint `config.yaml`'s at its own endpoint), and the pin
             # alone is a zone: whatever fails in reading more, the sandbox, the hook and the rule have it.
+            pinned = pin.get("wisp") or True  # the not-connected text names the pinned `wisp`
             zone, live = pinned_zone(pin, credential, ZONE_CACHE)
         else:
             url = ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
@@ -224,8 +230,28 @@ def register(ctx):
         if not protected and pinned:
             _warn(f"{UNPROTECTED}: the pin or the zone is malformed, so Hermes is not sandboxed")
 
-    def section(_session):
+    def section(session):
         """Rendered into each new session's prompt, so it says the state Wisp is in then; blank, Hermes leaves it out."""
+        text = rule_now()
+        if text and not unavailable():
+            routed.add(session.get("session_id"))
+        return text
+
+    def turn(session_id=None, **_):
+        """At each turn: the rule as of now for a session whose prompt has no connected rule (it started before this
+        load, or while Wisp was not connected or not answering) once Wisp answers; once per session, as the context
+        stays in its history. Hermes fixes a session's prompt section at its start, so only a turn can tell it.
+        ponytail: a session id Hermes rotates on compression, or a process restarted under an open session, gets the
+        rule once more."""
+        if session_id in routed or unavailable():
+            return None
+        text = rule_now()
+        if not text:
+            return None
+        routed.add(session_id)
+        return {"context": f"Wisp is connected and answering now; this rule replaces any earlier one about Wisp:\n{text}"}
+
+    def rule_now():
         if unconnected():
             return not_connected_rule(pinned)
         why = down()
@@ -254,6 +280,7 @@ def register(ctx):
             return down_rule(zone, why, start_closed) if why else rule
 
     ctx.register_system_prompt_section("wisp-routing", section)
+    ctx.register_hook("pre_llm_call", turn)
     # Built here, not per call: a hook that raises blocks every tool call (Hermes fails closed).
     config_path = get_config_path()
     try:
@@ -270,5 +297,6 @@ def register(ctx):
     if revival is None:
         revival = threading.Thread(target=revive, name="wisp-revive", daemon=True)
         revival.refusal = refusal
+        revival.routed = routed
         revival.start()
     revival.sealed = sealed

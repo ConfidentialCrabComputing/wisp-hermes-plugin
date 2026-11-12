@@ -180,6 +180,26 @@ def pre_tool_call(ctx, tool_name, args):
     return None
 
 
+def section(ctx, id, session_id):
+    """The system prompt section `id` as Hermes renders it once, at the start of session `session_id`."""
+    content = ctx.sections[id]
+    return content({"session_id": session_id}) if callable(content) else content
+
+
+def turn(ctx, session_id):
+    """What the plugin's `pre_llm_call` hooks add to a turn of session `session_id`'s user message, as Hermes joins it
+    (`turn_context._collect_pre_llm_call_context`): each string or `{"context": ...}`, by a blank line."""
+    parts = []
+    for callback in ctx.hooks.get("pre_llm_call", []):
+        result = callback(session_id=session_id, task_id="", turn_id="", user_message="", conversation_history=[],
+                          is_first_turn=False, model="", platform="cli", parent_session_id="", sender_id="")
+        if isinstance(result, dict) and result.get("context"):
+            parts.append(str(result["context"]))
+        elif isinstance(result, str) and result.strip():
+            parts.append(result)
+    return "\n\n".join(parts)
+
+
 def load_plugin():
     ctx = Ctx()
     # Hermes loads a user plugin only when `plugins.enabled` lists it (`plugins_discovery.gate_manifest`).
@@ -358,8 +378,9 @@ def main(argv):
         signal.pause()
     elif argv[:1] == ["python"] and len(argv) == 2:
         # Not Hermes's: Python run in this process, which loads the plugin by calling `load_plugin()` and runs its
-        # hooks with `pre_tool_call(ctx, tool_name, args)`.
-        exec(argv[1], {"load_plugin": load_plugin, "pre_tool_call": pre_tool_call})
+        # hooks with `pre_tool_call(ctx, tool_name, args)`, a session's start with `section(ctx, id, session_id)` and a
+        # turn with `turn(ctx, session_id)`.
+        exec(argv[1], {"load_plugin": load_plugin, "pre_tool_call": pre_tool_call, "section": section, "turn": turn})
     else:
         plugin_command(argv)
 

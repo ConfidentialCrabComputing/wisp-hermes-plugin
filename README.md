@@ -100,7 +100,8 @@ Hermes does not read `~/.wisp` or `~/.config/wisp` itself, not even while a step
    Linux, if the log names a fix "Before the restart", Hermes runs without the sandbox until it is applied: Hermes
    gives it to the user to run as root (without its leading `sudo`), and the user then sends `/restart`.
 
-That reload is the last step: no restart command follows. The user checks the result with a Wisp task, or Hermes with
+That reload is the last step: no restart command follows, and no `/new`: the chat that asked for the install hands
+Wisp's tasks to `ask_wisp` from its next message, as every session open then does. The user checks the result with a Wisp task, or Hermes with
 `hermes mcp test wisp`; Hermes can read the log to say how `integrate` ended. Hermes asks the user to send `/restart` in
 the chat only if the chat stays locked, or on macOS. `hermes gateway restart` is for a terminal: Hermes refuses it from
 inside a supervised gateway.
