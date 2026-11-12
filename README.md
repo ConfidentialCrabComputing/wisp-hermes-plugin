@@ -191,7 +191,8 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
   environment names, the profile's `.env` included, which the sandboxed model can write: a `PATH`, `PYTHONPATH` or
   `DYLD_*` set there runs outside the sandbox at the next such command, as in any unsandboxed process. The gateway they
   start is sandboxed at its own start, and one a `restart` runs in its own process (no service installed) is sandboxed
-  before it starts.
+  before it starts. Started from inside a sandboxed Hermes (its dashboard, or its terminal tool), such a command stays
+  in the sandbox, so launchd refuses it: with the service installed, run it from a terminal.
 - Under Wisp's sandbox, Hermes's browser runs without Chrome's own sandbox: Chrome's cannot start inside Wisp's, so the
   plugin has Hermes's browser launcher start it with `--no-sandbox` (an older Hermes: added to `AGENT_BROWSER_ARGS`). A
   Hermes that runs without Wisp's sandbox keeps Chrome's.
