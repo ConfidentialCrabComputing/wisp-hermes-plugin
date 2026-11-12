@@ -239,6 +239,23 @@ print(json.dumps(turn(ctx, "open")))""")
         self.assertEqual(first, "")  # its prompt routes already
         self.assertIn("Hand these tasks to the `ask_wisp` tool", second)
 
+    def test_a_session_whose_turn_comes_while_wisp_is_down_is_routed_at_its_turn_once_wisp_is_back(self):
+        # Connected and answering at the load, then nothing listens on the endpoint (a Runtime restarting).
+        self.answers(ZONE)
+        down = json.dumps(json.dumps({**self.config, "mcp_servers": {"wisp": {"url": _closed_url()}}}))
+        stopped, back, again = self.turns(f"""
+connect()
+ctx = load_plugin()
+open({str(self.home / 'config.yaml')!r}, 'w').write({down})
+print(json.dumps(turn(ctx, "open")))
+connect()
+print(json.dumps(turn(ctx, "open")))
+print(json.dumps(turn(ctx, "open")))""", FAKE_HERMES_WISP_STATUS="connected")
+
+        self.assertEqual(stopped, "")
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", back)
+        self.assertEqual(again, "")
+
     def test_a_session_while_wisp_is_not_connected_gets_nothing_at_its_turns(self):
         self.assertEqual(self.turns("""
 ctx = load_plugin()
