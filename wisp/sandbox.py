@@ -408,8 +408,11 @@ def _start_root(folder, linked):
 def _reads(folder, denied):
     """Whether this process sees what is in `folder`: it opens and has an entry that is not itself denied (a
     tmpfs over `folder` holds the mount point of each denied folder inside it). ponytail: an empty folder
-    reads as unseen, there being nothing in it to read yet."""
+    reads as unseen, there being nothing in it to read yet; a secret file likewise, so Linux's `/dev/null` over it too."""
     try:
+        if not os.path.isdir(folder):
+            with open(folder, "rb") as file:
+                return file.read(1) != b""
         with os.scandir(folder) as entries:
             return any(entry.path not in denied for entry in entries)
     except OSError:

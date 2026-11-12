@@ -380,6 +380,11 @@ print(json.dumps(sandbox.protect({second_zone!r}, {str(second_plugin)!r}, {str(s
         self.assertEqual(len(warnings), 1, warnings)
         self.assertIn(UNPROTECTED, warnings[0])
         self.assertIn(str(taxes), warnings[0])
+        key = self.tmp / "master.key"
+        key.write_text("root key")
+        warnings, _ = self.protect_twice({**self.zone, "secretFiles": [str(key)]}, self.plugin)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(str(key), warnings[0])
         warnings, stderr = self.protect_twice(self.zone, other_plugin)
         self.assertEqual(stderr, "")
         self.assertEqual(len(warnings), 1, warnings)
