@@ -1842,7 +1842,10 @@ class LiveLoad(unittest.TestCase):
             (tmp / name).chmod(0o755)
         registry = tmp / "runtime" / "active_sessions.json"
         registry.parent.mkdir()
-        registry.write_text(json.dumps({"entries": [{"lease_id": "mine", "pid": os.getpid()}, {"lease_id": "cli", "pid": 1}]}))
+        # Opened a second ago, as a chat pasting the login redirect then running `integrate`: inside Hermes's grace.
+        now = time.time()
+        registry.write_text(json.dumps({"entries": [{"lease_id": "mine", "pid": os.getpid(), "started_at": now - 1},
+                                                    {"lease_id": "cli", "pid": 1, "started_at": now - 1}]}))
         held = []
 
         def execve(*_):
