@@ -3,6 +3,7 @@ write denied under the plugin's own directory. Applied in-process, so every laun
 profile's gateway service, its cron, the dashboard) is covered and every child inherits it."""
 
 import ctypes
+import glob
 import importlib.util
 import json
 import logging
@@ -26,6 +27,8 @@ LEGACY_TIOCSTI = "/proc/sys/dev/tty/legacy_tiocsti"
 BWRAP = "/usr/bin/bwrap"
 EXTERNAL_SUPERVISOR = "--external-supervisor"
 PROBE_TRIES = 3
+# How many other profiles' plugins a sandbox keeps read-only besides its own load's.
+OTHER_PLUGINS = 64
 # Where `systemctl` is looked for, never through `PATH`, which `.env` sets. The third is NixOS's.
 SYSTEMCTL_DIRS = ["/usr/bin", "/bin", "/run/current-system/sw/bin", "/usr/sbin", "/sbin"]
 
@@ -40,7 +43,7 @@ def _ancestors(path):
     return [] if parent == path else [parent, *_ancestors(parent)]
 
 
-def profile(denied, plugin_dir):
+def profile(denied, plugin_dirs):
     """The Seatbelt profile: everything allowed but the zone and writes to the plugin. A rule names a path,
     so whatever takes a folder out from under that path takes it out from under its rule. Each parent itself
     (`literal`) is denied only those: `file-write-unlink`, being renamed or removed; `file-clone`, being
@@ -48,12 +51,12 @@ def profile(denied, plugin_dir):
     made before Wisp makes it, as a link elsewhere that every later write under the path would follow.
     Not `file-write*`, which Seatbelt also answers `access(W_OK)` from, so Hermes would take its own home
     for read-only, and not `file-write-mode`, so its `chmod` of its home keeps working."""
-    parents = sorted({parent for path in [*denied, plugin_dir] for parent in _ancestors(path)})
+    parents = sorted({parent for path in [*denied, *plugin_dirs] for parent in _ancestors(path)})
     return "\n".join([
         "(version 1)",
         "(allow default)",
         *(f"(deny file-read* file-write* (subpath {_literal(path)}))" for path in denied),
-        f"(deny file-write* (subpath {_literal(plugin_dir)}))",
+        *(f"(deny file-write* (subpath {_literal(path)}))" for path in plugin_dirs),
         *(f"(deny file-write-unlink file-clone file-write-create (literal {_literal(parent)}))" for parent in parents),
         "",
     ])
@@ -198,16 +201,16 @@ def _inherited_fds():
     return [fd for fd in map(int, os.listdir("/dev/fd")) if fd > 2 and passes(fd)]
 
 
-def _folders(denied, plugin_dir):
-    return [*(arg for path in denied for arg in ("--deny", path)), "--read-only", plugin_dir]
+def _folders(denied, plugin_dirs):
+    return [*(arg for path in denied for arg in ("--deny", path)), *(arg for path in plugin_dirs for arg in ("--read-only", path))]
 
 
-def _check(denied, plugin_dir, wisp):
+def _check(denied, plugin_dirs, wisp):
     """What keeps bubblewrap from sandboxing with these folders, or None. Probing them with `/bin/true`, so nothing the
     user can write decides it: bubblewrap says `child-pid` before it mounts, so a mount that fails after the takeover
     would end in no Hermes. What a folder would take from Hermes's start is `_start_root`'s, by path."""
     try:
-        check = subprocess.run([wisp, "sandbox-exec", "--check", *_folders(denied, plugin_dir)], capture_output=True, text=True,
+        check = subprocess.run([wisp, "sandbox-exec", "--check", *_folders(denied, plugin_dirs)], capture_output=True, text=True,
                                timeout=60, env=_outside(os.environ))
     except (OSError, subprocess.SubprocessError) as exc:
         return f"wisp sandbox-exec --check failed: {exc}"
@@ -216,12 +219,12 @@ def _check(denied, plugin_dir, wisp):
     return check.stdout.strip() or check.stderr.strip() or f"wisp sandbox-exec --check failed: it exited {check.returncode}"
 
 
-def _check_repeated(denied, plugin_dir, wisp):
+def _check_repeated(denied, plugin_dirs, wisp):
     """`_check`, believed only after `PROBE_TRIES` failures in a row: one can be a passing thing (a process toggling a
     lock on a folder's parent, a load past the probe's timeout), and it would cost a real folder or the sandbox.
     ponytail: a process that keeps a folder failing still gets it left out, with the warning; this narrows that, no more."""
     for _ in range(PROBE_TRIES):
-        if (problem := _check(denied, plugin_dir, wisp)) is None:
+        if (problem := _check(denied, plugin_dirs, wisp)) is None:
             return None
     return problem
 
@@ -239,12 +242,13 @@ def _release_own_chats():
         logging.getLogger(__name__).warning("Wisp: could not release this process's open chats: %r", exc)
 
 
-def _reexec(denied, plugin_dir, wisp):
+def _reexec(denied, plugin_dirs, wisp):
     """Linux: this Hermes started again under bubblewrap, with the arguments `wisp sandbox-exec` prints, and this
     process, keeping its PID, turned into the supervisor (`supervise.py`); the reason it could not or a folder was
-    left out, or None when it already runs there with all of them. The fresh process has no unconfined thread, as an in-process sandbox (Landlock) would
+    left out, or None when it already runs there with all of them. `plugin_dirs[0]` is this load's own plugin. The fresh process has no unconfined thread, as an in-process sandbox (Landlock) would
     leave. bubblewrap's info comes through an anonymous pipe: nothing outside the sandbox opens a path a process
     left inside could swap. Inside a sandbox, a list that fails costs no more probes: the start before this one made them."""
+    plugin_dir = plugin_dirs[0]
     if _sandboxed(denied, plugin_dir):
         return None
     # Cheap first: Hermes starts with no Node child where bubblewrap is not even there.
@@ -253,7 +257,7 @@ def _reexec(denied, plugin_dir, wisp):
     wisp = wisp or shutil.which("wisp")
     if not wisp:
         return "wisp is not on PATH, so Hermes cannot be re-run under bubblewrap"
-    problem = _check(denied, plugin_dir, wisp)
+    problem = _check(denied, plugin_dirs, wisp)
     if problem is not None:
         # Inside, bubblewrap may make no namespace (Ubuntu 25.04+'s AppArmor), so its reason would be that, not the
         # folder's: the kernel names what the start before this one left out.
@@ -261,12 +265,15 @@ def _reexec(denied, plugin_dir, wisp):
             return f"bubblewrap could not mount {', '.join(f for f in denied if not _sandboxed([f], plugin_dir))}"
         # A link a model left at an absent folder's path can resolve to what no tmpfs can cover (a folder `/bin/true` lives
         # in, or a path too long to mount): that folder goes, not the sandbox around the others.
-        if _check_repeated([], plugin_dir, wisp) is not None:
-            return problem
-        denied = [folder for folder in denied if _check_repeated([folder], plugin_dir, wisp) is None]
-        if (left := _check_repeated(denied, plugin_dir, wisp)) is not None:
+        if _check_repeated([], plugin_dirs, wisp) is not None:
+            # Another profile's plugin it cannot bind (a link swapped in since `protect` looked) goes, not the sandbox.
+            if len(plugin_dirs) == 1 or _check_repeated([], plugin_dirs[:1], wisp) is not None:
+                return problem
+            plugin_dirs = plugin_dirs[:1]
+        denied = [folder for folder in denied if _check_repeated([folder], plugin_dirs, wisp) is None]
+        if (left := _check_repeated(denied, plugin_dirs, wisp)) is not None:
             return left
-    folders = _folders(denied, plugin_dir)
+    folders = _folders(denied, plugin_dirs)
     command = _command()
     for _ in range(PROBE_TRIES):
         try:
@@ -327,17 +334,18 @@ def _without_chromes_sandbox():
     launcher.needs_chromium_sandbox_bypass = lambda: True
 
 
-def apply(denied, plugin_dir, wisp):
+def apply(denied, plugin_dirs, wisp):
     """Sandboxes this process; the reason it could not or left a folder out, or None, never an exception. A second
-    `sandbox_init` in one process fails, so a profile cannot be tightened once applied. On Linux `wisp` (the pinned binary,
+    `sandbox_init` in one process fails, so a profile cannot be tightened once applied: `plugin_dirs`, this load's own
+    plugin first, are every profile's, kept read-only from the first load on. On Linux `wisp` (the pinned binary,
     else the one on PATH) re-execs it under bubblewrap."""
     if sys.platform not in ("darwin", "linux"):
         return f"no sandbox on {sys.platform}"
     try:
         if sys.platform == "linux":
             # A working start returns here only inside bubblewrap; so can a folder left out of a running sandbox.
-            problem = _reexec(denied, plugin_dir, wisp)
-            if _sandboxed([], plugin_dir):
+            problem = _reexec(denied, plugin_dirs, wisp)
+            if _sandboxed([], plugin_dirs[0]):
                 _without_chromes_sandbox()
             return problem
         # A second `sandbox_init` with another profile fails, and says so on stderr: inside one, only what reaches the zone
@@ -347,7 +355,7 @@ def apply(denied, plugin_dir, wisp):
         sandbox_init = ctypes.CDLL(None).sandbox_init
         sandbox_init.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_char_p)]
         error = ctypes.c_char_p()
-        if sandbox_init(profile(denied, plugin_dir).encode(), 0, ctypes.byref(error)) != 0:
+        if sandbox_init(profile(denied, plugin_dirs).encode(), 0, ctypes.byref(error)) != 0:
             return f"sandbox_init failed: {(error.value or b'').decode(errors='replace')}"
     except Exception as exc:  # noqa: BLE001 — whatever stops the start, Hermes carries on, and says so
         return f"the sandbox could not start: {exc!r}"
@@ -383,7 +391,7 @@ def _in_its_gateway():
     return False
 
 
-def _sandbox_its_gateway(denied, plugin_dir, wisp, sandboxed):
+def _sandbox_its_gateway(denied, plugin_dirs, wisp, sandboxed):
     """Has the gateway a service command runs in its own process (Hermes's fallback with no service installed) sandboxed
     before it starts, calling `sandboxed()` once it is; False when this Hermes has no `run_gateway` to wrap. Every other
     gateway is a process of its own, which this plugin sandboxes at its start."""
@@ -394,7 +402,7 @@ def _sandbox_its_gateway(denied, plugin_dir, wisp, sandboxed):
         return False
 
     def sandboxed_run(*args, **kwargs):
-        if failed := apply(denied, plugin_dir, wisp):
+        if failed := apply(denied, plugin_dirs, wisp):
             logging.getLogger(__name__).warning("%s: %s", UNPROTECTED, failed)
             print(f"{UNPROTECTED}: {failed}", file=sys.stderr, flush=True)
         elif sandboxed:
@@ -490,6 +498,21 @@ def _here(path):
     return True
 
 
+def _other_profiles_plugins(plugin, hermes_home, denied):
+    """The Wisp plugin of each other profile of `hermes_home`'s Hermes root (the root's and each `profiles/*`'s) there is
+    now: a gateway serving several profiles loads the plugin once for each in one process, and only the first load's
+    sandbox counts. Only a folder at its own real path, so a link a model planted there makes nothing else read-only, and
+    none a zone folder lies inside or holds: a read-only bind over a folder's tmpfs would show it again. A profile
+    integrated later is covered from the next start."""
+    root = os.path.dirname(os.path.dirname(hermes_home)) if os.path.basename(os.path.dirname(hermes_home)) == "profiles" else hermes_home
+    found = [os.path.join(root, "plugins", "wisp"), *sorted(glob.glob(os.path.join(glob.escape(root), "profiles", "*", "plugins", "wisp")))]
+    # ponytail: at most OTHER_PLUGINS, so folders a model makes by the thousand cannot fail the sandbox's start; past them a
+    # profile's plugin is left as before this, its load warning.
+    return [path for path in found
+            if path != plugin and os.path.isdir(path) and os.path.realpath(path) == path
+            and not any(_within(path, folder) or _within(folder, path) for folder in denied)][:OTHER_PLUGINS]
+
+
 def _has_terminal():
     """Whether this process has a controlling terminal, stdin or not: `hermes </dev/null` on a terminal can still
     type into it."""
@@ -546,19 +569,20 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None, sandboxed_lat
             warnings.append(f"{UNPROTECTED}: {folder} would take {root} from Hermes's start, so it is not sandboxed")
         else:
             denied.append(folder)
+    plugins = [plugin, *_other_profiles_plugins(plugin, hermes_home, denied)]
     # Inside a sandbox already (a sandboxed Hermes's dashboard or terminal tool) launchd refuses the service whatever this
     # does, and a gateway it runs here is in that sandbox: checked below as any other load inside one.
     if (sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and not _in_its_gateway() and not _in_a_sandbox()
             # A folder left out above stays out of that gateway's sandbox too: it is not told it is closed.
-            and _sandbox_its_gateway(denied, plugin, wisp, None if warnings else sandboxed_later)):
+            and _sandbox_its_gateway(denied, plugins, wisp, None if warnings else sandboxed_later)):
         return [*warnings, f"{SERVICE_COMMAND}: launchd refuses to load it from a sandboxed process"]
     kept = set(map(os.path.realpath, _zone_folders(pinned or zone)))
     held = [folder for folder in denied if folder in kept]
-    failed = apply(denied, plugin, wisp)
+    failed = apply(denied, plugins, wisp)
     # On Linux a start that works never returns here: the Hermes it starts comes through this with the sandbox up, and goes no deeper.
     left = []
     if failed and held != denied:
-        again = None if _sandboxed(held, plugin) else apply(held, plugin, wisp)
+        again = None if _sandboxed(held, plugin) else apply(held, plugins, wisp)
         if again is None:
             # The kernel says which: on Linux an added folder can be in the sandbox with another left out, on macOS none is.
             left = [folder for folder in denied if folder not in held and not _sandboxed([folder], plugin)]

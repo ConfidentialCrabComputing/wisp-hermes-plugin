@@ -319,6 +319,52 @@ for path in ({str(self.plugin / "__init__.py")!r}, {str(self.plugin / "zone.json
         print("refused")""")
         self.assertEqual(done.stdout.split(), ["refused"] * 3)
 
+    def other_profiles_plugin(self, name="work"):
+        """Profile `name` of this Hermes root with the plugin laid out and enabled, as integrate leaves it."""
+        home = self.home / "profiles" / name
+        shutil.copytree(PLUGIN, home / "plugins" / "wisp", ignore=shutil.ignore_patterns("__pycache__", "zone.json"))
+        (home / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["wisp"]}}))
+        return home
+
+    @sandboxed
+    def test_a_sandbox_made_for_one_profiles_load_keeps_every_profiles_plugin_read_only(self):
+        work = self.other_profiles_plugin()
+        default = (self.home, self.plugin)
+        for loads, other in ((default, work / "plugins" / "wisp"), ((work, work / "plugins" / "wisp"), self.plugin)):
+            with self.subTest(loads=str(loads[0])):
+                self.home, self.plugin = loads
+                done = self.python(f"""
+load_plugin()
+for path in ({str(other / "__init__.py")!r}, {str(other / "new.py")!r}):
+    try:
+        open(path, "a").write("x")
+        print("written")
+    except OSError:
+        print("refused")""")
+                self.assertEqual(done.stdout.split(), ["refused"] * 2, done.stderr)
+                self.assertNotIn(UNPROTECTED, done.stderr)
+                self.home, self.plugin = default
+
+    @sandboxed
+    def test_a_profiles_plugin_reached_through_a_link_makes_nothing_read_only(self):
+        elsewhere = self.tmp / "notes"
+        (elsewhere / "plugins" / "wisp").mkdir(parents=True)
+        (self.home / "profiles").mkdir()
+        (self.home / "profiles" / "work").symlink_to(elsewhere)
+
+        done = self.python(f"""
+load_plugin()
+open({str(elsewhere / "plugins" / "wisp" / "new.txt")!r}, "w").write("new")""")
+
+        self.assertEqual((elsewhere / "plugins" / "wisp" / "new.txt").read_text(), "new", done.stderr)
+        self.assertNotIn(UNPROTECTED, done.stderr)
+
+    @macos
+    def test_a_second_profiles_load_in_a_sandboxed_gateway_warns_nothing(self):
+        work = self.other_profiles_plugin()
+
+        self.assertEqual(self.protect_twice(self.zone, work / "plugins" / "wisp"), ([], ""))
+
     @macos
     def test_connect_remove_inside_the_sandbox_finishes_and_says_nothing_of_the_cache_it_keeps(self):
         done = self.hermes("wisp", "connect", "--remove")
@@ -1708,7 +1754,8 @@ class ProbeFailures(unittest.TestCase):
         self.wisp.write_text(f"""#!{sys.executable}
 import json, os, sys
 own = sys.argv[3:sys.argv.index("--")] if "--" in sys.argv else sys.argv[3:]
-key = " ".join([sys.argv[2], *(os.path.basename(own[i + 1]) for i in range(0, len(own), 2) if own[i] == "--deny")])
+key = " ".join([sys.argv[2], *(os.path.basename(own[i + 1]) for i in range(0, len(own), 2) if own[i] == "--deny"),
+                *["+" + os.path.basename(own[i + 1]) for i in range(0, len(own), 2) if own[i] == "--read-only"][1:]])
 log = open({str(self.log)!r}, "r+")
 tried = log.read().splitlines().count(key)
 log.write(key + "\\n")
@@ -1718,14 +1765,21 @@ if tried < json.load(open({str(self.tmp / "plan")!r})).get(key, 0):
 """)
         self.wisp.chmod(0o755)
 
-    def start(self, plan, folders=("a", "b")):
-        """`_reexec`, with `true` in bubblewrap's place: what it says, and each run of `wisp`, in order."""
+    def start(self, plan, folders=("a", "b"), plugins=("plugin",)):
+        """`_reexec`, with `true` in bubblewrap's place: what it says, and each run of `wisp`, in order. A key names each
+        read-only folder after this load's own plugin with a `+`."""
         (self.tmp / "plan").write_text(json.dumps(plan))
         with patch.object(self.sandbox, "BWRAP", shutil.which("true")), patch.object(self.sandbox, "_inherited_fds", list):
-            said = self.sandbox._reexec([f"/zone/{folder}" for folder in folders], "/zone/plugin", str(self.wisp))
+            said = self.sandbox._reexec([f"/zone/{folder}" for folder in folders], [f"/zone/{p}" for p in plugins], str(self.wisp))
         return said, self.log.read_text().splitlines()
 
     STARTED = "wisp sandbox-exec failed: bubblewrap exited 0"
+
+    def test_another_profiles_plugin_bubblewrap_cannot_bind_is_left_out_and_the_sandbox_stays(self):
+        said, runs = self.start({"--check a b +work": 9, "--check +work": 9}, plugins=("plugin", "work"))
+
+        self.assertEqual(said, self.STARTED)
+        self.assertEqual(runs[-1], "--print-args a b")
 
     def test_a_first_probe_that_passes_runs_no_other(self):
         self.assertEqual(self.start({}), (self.STARTED, ["--check a b", "--print-args a b"]))
@@ -1809,7 +1863,7 @@ if sys.argv[1:3] == ["sandbox-exec", "--print-args"]:
 
         with patch.dict(os.environ, self.LOADER), patch.object(sandbox, "BWRAP", str(tmp / "bwrap")), \
                 patch.object(sandbox, "_inherited_fds", list):
-            sandbox._reexec(["/zone/a"], "/zone/plugin", str(tmp / "wisp"))
+            sandbox._reexec(["/zone/a"], ["/zone/plugin"], str(tmp / "wisp"))
 
         runs = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual([run["argv"][:2] for run in runs[:2]], [["sandbox-exec", "--check"], ["sandbox-exec", "--print-args"]])
@@ -1854,7 +1908,7 @@ class LiveLoad(unittest.TestCase):
                 patch.object(sandbox, "_inherited_fds", list), patch.object(sandbox.os, "execve", execve):
             for name in [n for n in sys.modules if n == "hermes_cli" or n.startswith("hermes_cli.")]:
                 del sys.modules[name]
-            sandbox._reexec(["/zone/a"], "/zone/plugin", str(tmp / "wisp"))
+            sandbox._reexec(["/zone/a"], ["/zone/plugin"], str(tmp / "wisp"))
 
         self.assertEqual(held, [["cli"]])
 
@@ -1881,7 +1935,7 @@ class SandboxModule(unittest.TestCase):
             os.environ.pop("AGENT_BROWSER_ARGS", None)
             if before is not None:
                 os.environ["AGENT_BROWSER_ARGS"] = before
-            self.assertIsNotNone(self.sandbox.apply(["/zone/a"], "/zone/plugin", None))
+            self.assertIsNotNone(self.sandbox.apply(["/zone/a"], ["/zone/plugin"], None))
             return os.environ.get("AGENT_BROWSER_ARGS")
 
     def test_a_linux_without_bubblewrap_and_any_other_platform_leave_chromes_own_sandbox_on(self):
