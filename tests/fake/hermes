@@ -26,7 +26,6 @@ import importlib.util
 import json
 import os
 import shutil
-import signal
 import sys
 import time
 from pathlib import Path
@@ -178,6 +177,26 @@ def pre_tool_call(ctx, tool_name, args):
         if isinstance(result, dict) and result.get("action") == "block" and result.get("message"):
             return result["message"]
     return None
+
+
+def section(ctx, id, session_id):
+    """The system prompt section `id` as Hermes renders it once, at the start of session `session_id`."""
+    content = ctx.sections[id]
+    return content({"session_id": session_id}) if callable(content) else content
+
+
+def turn(ctx, session_id):
+    """What the plugin's `pre_llm_call` hooks add to a turn of session `session_id`'s user message, as Hermes joins it
+    (`turn_context._collect_pre_llm_call_context`): each string or `{"context": ...}`, by a blank line."""
+    parts = []
+    for callback in ctx.hooks.get("pre_llm_call", []):
+        result = callback(session_id=session_id, task_id="", turn_id="", user_message="", conversation_history=[],
+                          is_first_turn=False, model="", platform="cli", parent_session_id="", sender_id="")
+        if isinstance(result, dict) and result.get("context"):
+            parts.append(str(result["context"]))
+        elif isinstance(result, str) and result.strip():
+            parts.append(result)
+    return "\n\n".join(parts)
 
 
 def load_plugin():
@@ -353,13 +372,28 @@ def main(argv):
         ctx = load_plugin()
         print(json.dumps([pre_tool_call(ctx, name, args) for name, args in json.load(sys.stdin)]))
     elif argv[:2] == ["gateway", "run"]:
-        # A gateway, as far as the sandbox is concerned: the plugin loaded, then waiting for its signals.
+        # A gateway, as far as the sandbox is concerned: the plugin loaded, then the gateway in this process.
         load_plugin()
-        signal.pause()
+        from hermes_cli.gateway import run_gateway
+        run_gateway()
+    elif argv[:1] == ["gateway"] and argv[1:2] in (["start"], ["stop"], ["restart"], ["install"], ["uninstall"]):
+        # As Hermes: the plugin loads (reading the gateway's config discovers plugins), then the service manager is
+        # asked; with no service installed (`FAKE_HERMES_NO_SERVICE`) `restart` runs the gateway in this process. With
+        # `FAKE_HERMES_SERVED` the plugin is a served profile's only, which that gateway loads as it starts.
+        from hermes_cli import gateway
+        if os.environ.get("FAKE_HERMES_SERVED"):
+            gateway.served.append(load_plugin)
+        else:
+            load_plugin()
+        if os.environ.get("FAKE_HERMES_PROBE"):
+            print(f"service: {gateway.probe()}")
+        if os.environ.get("FAKE_HERMES_NO_SERVICE") and argv[1] == "restart":
+            gateway.run_gateway(replace=True)
     elif argv[:1] == ["python"] and len(argv) == 2:
         # Not Hermes's: Python run in this process, which loads the plugin by calling `load_plugin()` and runs its
-        # hooks with `pre_tool_call(ctx, tool_name, args)`.
-        exec(argv[1], {"load_plugin": load_plugin, "pre_tool_call": pre_tool_call})
+        # hooks with `pre_tool_call(ctx, tool_name, args)`, a session's start with `section(ctx, id, session_id)` and a
+        # turn with `turn(ctx, session_id)`.
+        exec(argv[1], {"load_plugin": load_plugin, "pre_tool_call": pre_tool_call, "section": section, "turn": turn})
     else:
         plugin_command(argv)
 

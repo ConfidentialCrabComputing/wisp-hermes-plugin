@@ -147,14 +147,22 @@ def _plainly(connector):
 def not_connected(pinned):
     """What the hook refuses with, and the rule says, while this profile names no Wisp endpoint or holds no
     credential: there is no `ask_wisp`, so nothing may route to it. `pinned`: `wisp integrate hermes` put Wisp on
-    this machine, and it is the repair; else Wisp is on another machine, and `hermes wisp connect` is."""
+    this machine (the pinned `wisp`'s path, or True), and it is the repair, taken live; else Wisp is on another
+    machine, and `hermes wisp connect` is."""
+    if pinned:
+        return (f"Wisp is not connected to Hermes: tell the user to run {_repair(pinned)} outside Hermes, in a terminal; "
+                "no restart: a running gateway takes the connection on its own, a CLI chat at `/reload-mcp`.")
     return f"Wisp is not connected to Hermes: tell the user to run {_repair(pinned)} in a terminal, then restart Hermes."
 
 
 def _repair(pinned):
-    """The command that connects this profile to Wisp: see `not_connected`."""
-    return ("`wisp integrate hermes`" if pinned else
-            "`hermes wisp connect https://<host>/mcp` (with the credential `wisp tokens create --name <name> --host-agent` printed)")
+    """The command that connects this profile to Wisp, whichever way Wisp was installed: see `not_connected`."""
+    if pinned:
+        # The pin is data: one line, no backtick, and short enough to leave the rule within Hermes's section cap.
+        wisp = (_inert(pinned).replace("`", "'") if isinstance(pinned, str) and 0 < len(pinned) <= 512
+                else "~/.wisp/bin/wisp")
+        return f"`{wisp} integrate hermes --skip-connectors`"
+    return "`hermes wisp connect https://<host>/mcp` (with the credential `wisp tokens create --name <name> --host-agent` printed)"
 
 
 def not_connected_rule(pinned):

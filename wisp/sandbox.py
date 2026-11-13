@@ -15,8 +15,13 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 
 UNPROTECTED = "Wisp's zone is unprotected"
+SERVICE_COMMAND = "Hermes manages its gateway service unsandboxed"
+# The `hermes gateway` commands that only manage the service: launchd refuses `launchctl bootstrap` from a sandboxed process.
+SERVICE_VERBS = ("start", "stop", "restart", "install", "uninstall")
+SANDBOXED_ALREADY = "this process runs in a sandbox already, which cannot be tightened"
 LEGACY_TIOCSTI = "/proc/sys/dev/tty/legacy_tiocsti"
 BWRAP = "/usr/bin/bwrap"
 EXTERNAL_SUPERVISOR = "--external-supervisor"
@@ -190,7 +195,7 @@ def _inherited_fds():
             return os.get_inheritable(fd) and not stat.S_ISDIR(os.fstat(fd).st_mode)
         except OSError:  # The listing's own fd, closed by now.
             return False
-    return [fd for fd in map(int, os.listdir("/proc/self/fd")) if fd > 2 and passes(fd)]
+    return [fd for fd in map(int, os.listdir("/dev/fd")) if fd > 2 and passes(fd)]
 
 
 def _folders(denied, plugin_dir):
@@ -314,6 +319,12 @@ def _without_chromes_sandbox():
     args = os.environ.get("AGENT_BROWSER_ARGS", "")
     if "--no-sandbox" not in (arg.strip() for arg in args.split(",")):
         os.environ["AGENT_BROWSER_ARGS"] = f"{args},--no-sandbox" if args.strip() else "--no-sandbox"
+    # A Hermes with its own launcher reads no `AGENT_BROWSER_ARGS`: it adds `--no-sandbox` only where it asks this.
+    try:
+        import tools.browser_launcher as launcher
+    except Exception:  # an older Hermes, or a launcher that fails to load: the line above is all there is
+        return
+    launcher.needs_chromium_sandbox_bypass = lambda: True
 
 
 def apply(denied, plugin_dir, wisp):
@@ -329,6 +340,10 @@ def apply(denied, plugin_dir, wisp):
             if _sandboxed([], plugin_dir):
                 _without_chromes_sandbox()
             return problem
+        # A second `sandbox_init` with another profile fails, and says so on stderr: inside one, only what reaches the zone
+        # (`protect` checks) is worth a line.
+        if _in_a_sandbox():
+            return SANDBOXED_ALREADY
         sandbox_init = ctypes.CDLL(None).sandbox_init
         sandbox_init.argtypes = [ctypes.c_char_p, ctypes.c_uint64, ctypes.POINTER(ctypes.c_char_p)]
         error = ctypes.c_char_p()
@@ -338,6 +353,56 @@ def apply(denied, plugin_dir, wisp):
         return f"the sandbox could not start: {exc!r}"
     _without_chromes_sandbox()
     return None
+
+
+def _in_a_sandbox():
+    """macOS: whether this process runs in a sandbox already."""
+    libc = ctypes.CDLL(None)
+    libc.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    return libc.sandbox_check(os.getpid(), None, 0) == 1
+
+
+def _manages_the_service(argv):
+    """Whether Hermes's arguments `argv` are a `hermes gateway` command that only manages the service, a profile named
+    before it or not. Anything else before `gateway` keeps the sandbox."""
+    while argv[:1] in (["-p"], ["--profile"]):
+        argv = argv[2:]
+    return argv[:1] == ["gateway"] and argv[1:2] in ([verb] for verb in SERVICE_VERBS)
+
+
+def _in_its_gateway():
+    """Whether the gateway a service command runs in its own process has started: `run_gateway` is on the main thread's
+    stack, where its event loop runs, whichever thread loads a plugin (a served profile's, a reload). A load then takes
+    the sandbox as any gateway's does. ponytail: found by Hermes's name for it; a Hermes that renames it leaves such a
+    load unsandboxed, with the service command's warning."""
+    frame = sys._current_frames().get(threading.main_thread().ident)
+    while frame is not None:
+        if frame.f_code.co_name == "run_gateway" and os.path.basename(frame.f_code.co_filename) == "gateway.py":
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _sandbox_its_gateway(denied, plugin_dir, wisp, sandboxed):
+    """Has the gateway a service command runs in its own process (Hermes's fallback with no service installed) sandboxed
+    before it starts, calling `sandboxed()` once it is; False when this Hermes has no `run_gateway` to wrap. Every other
+    gateway is a process of its own, which this plugin sandboxes at its start."""
+    try:
+        from hermes_cli import gateway
+        run = gateway.run_gateway
+    except Exception:  # noqa: BLE001 — an older or rewritten Hermes: sandboxed now, as any other command
+        return False
+
+    def sandboxed_run(*args, **kwargs):
+        if failed := apply(denied, plugin_dir, wisp):
+            logging.getLogger(__name__).warning("%s: %s", UNPROTECTED, failed)
+            print(f"{UNPROTECTED}: {failed}", file=sys.stderr, flush=True)
+        elif sandboxed:
+            sandboxed()
+        return run(*args, **kwargs)
+
+    gateway.run_gateway = sandboxed_run
+    return True
 
 
 def _zone_folders(zone):
@@ -399,12 +464,18 @@ def _start_root(folder, linked):
 
 
 def _reads(folder, denied):
-    """Whether this process sees what is in `folder`: it opens and has an entry that is not itself denied (a
-    tmpfs over `folder` holds the mount point of each denied folder inside it). ponytail: an empty folder
-    reads as unseen, there being nothing in it to read yet."""
+    """Whether this process sees what is in `folder`: it opens and has an entry that is neither denied itself nor
+    only the way to a denied folder deeper inside (a tmpfs over `folder` holds the mount point of each denied
+    folder inside it, and each folder on the way there). ponytail: an empty folder reads as unseen, there being
+    nothing in it to read yet; a secret file likewise, so Linux's `/dev/null` over it too."""
     try:
+        if not os.path.isdir(folder):
+            with open(folder, "rb") as file:
+                return file.read(1) != b""
         with os.scandir(folder) as entries:
-            return any(entry.path not in denied for entry in entries)
+            return any(entry.path not in denied
+                       and (not any(_within(path, entry.path) for path in denied) or _reads(entry.path, denied))
+                       for entry in entries)
     except OSError:
         return False
 
@@ -444,11 +515,12 @@ def tiocsti_warning(sysctl=LEGACY_TIOCSTI):
     return f"{typing}; set `sysctl dev.tty.legacy_tiocsti=0` (kernel 6.2+)" if allowed else None
 
 
-def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
+def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None, sandboxed_later=lambda: None):
     """Sandboxes this Hermes process away from `zone` when Wisp is local (its data directory is on this
     machine; for a zone `wisp integrate hermes` pinned, any of its folders), then checks from inside that
     the zone is out of reach. `pinned` is that pin. When the whole list fails with a pin, the pinned folders alone get one
-    more try. The warnings to show in Hermes: a pinned zone left unsandboxed always warns."""
+    more try. The warnings to show in Hermes: a pinned zone left unsandboxed always warns. A service command's warning
+    leaves the sandbox to the gateway it may run in this process: `sandboxed_later()` is called once that is sandboxed."""
     zone_folders = _zone_folders(zone)
     if not (any(map(_here, zone_folders)) if pinned else _here(zone["dataDir"])):
         return [f"{UNPROTECTED}: none of the folders wisp integrate hermes pinned is on this machine"] if pinned else []
@@ -474,6 +546,12 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
             warnings.append(f"{UNPROTECTED}: {folder} would take {root} from Hermes's start, so it is not sandboxed")
         else:
             denied.append(folder)
+    # Inside a sandbox already (a sandboxed Hermes's dashboard or terminal tool) launchd refuses the service whatever this
+    # does, and a gateway it runs here is in that sandbox: checked below as any other load inside one.
+    if (sys.platform == "darwin" and _manages_the_service(sys.argv[1:]) and not _in_its_gateway() and not _in_a_sandbox()
+            # A folder left out above stays out of that gateway's sandbox too: it is not told it is closed.
+            and _sandbox_its_gateway(denied, plugin, wisp, None if warnings else sandboxed_later)):
+        return [*warnings, f"{SERVICE_COMMAND}: launchd refuses to load it from a sandboxed process"]
     kept = set(map(os.path.realpath, _zone_folders(pinned or zone)))
     held = [folder for folder in denied if folder in kept]
     failed = apply(denied, plugin, wisp)
@@ -491,9 +569,18 @@ def protect(zone, plugin_dir, hermes_home, pinned=None, wisp=None):
         else:
             failed = again
     open_folders = [folder for folder in denied if folder not in left and _reads(folder, denied)]
-    if open_folders:
-        warnings.append(f"{UNPROTECTED}: Hermes can read {', '.join(open_folders)}"
-                        + (f" ({failed})" if failed else ""))
+    # macOS, in a sandbox already (another load in this process, or a sandboxed parent): what this process can reach is the
+    # warning, not the `sandbox_init` that could not tighten it. ponytail: a folder empty or not there yet reads as closed.
+    # The folder and each file in it: a folder's mode alone leaves its files' own.
+    writable = failed == SANDBOXED_ALREADY and any(
+        os.access(path, os.W_OK) for path in [plugin, *(os.path.join(top, name) for top, dirs, files in os.walk(plugin)
+                                                        for name in [*dirs, *files])])
+    if open_folders or writable:
+        reached = ([f"read {', '.join(open_folders)}"] if open_folders else []) + ([f"write {plugin}"] if writable else [])
+        warnings.append(f"{UNPROTECTED}: Hermes can {' and '.join(reached)}" + (f" ({failed})" if failed else ""))
+    elif failed == SANDBOXED_ALREADY:
+        # Nothing reaches the zone, so this is Wisp's sandbox, where Chrome's own cannot start either.
+        _without_chromes_sandbox()
     elif failed:
         warnings.append(f"{UNPROTECTED}: {failed}")
     # `failed` under a running sandbox: a folder was left out of it, and all this still holds for the rest.

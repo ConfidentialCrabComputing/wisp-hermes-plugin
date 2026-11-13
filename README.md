@@ -50,7 +50,8 @@ Then:
 
 - A Confirmation Wisp raises shows in Hermes's own approval panel, and is denied when nobody answers within Hermes's
   5 minutes (`approvals.timeout`). One "Allow once" covers that tool for the rest of the task, except where Wisp's own
-  rules ask every time (a Judge escalation, an "Always ask" Rule).
+  rules ask every time (a Judge escalation, an "Always ask" Rule) and except a command or a file write, which asks each
+  time, since its name says nothing of what the next call does.
 - A Confirmation of `/wisp` is asked in the chat itself (Telegram, Slack, Discord, the TUI, the Desktop), and is denied
   when nobody answers within Hermes's clarify timeout, 90 seconds by default. `agent.clarify_timeout` in Hermes's config
   widens it, for every clarifying question Hermes asks. The task goes on without that tool, and can be asked again.
@@ -99,9 +100,15 @@ Hermes does not read `~/.wisp` or `~/.config/wisp` itself, not even while a step
    Linux, if the log names a fix "Before the restart", Hermes runs without the sandbox until it is applied: Hermes
    gives it to the user to run as root (without its leading `sudo`), and the user then sends `/restart`.
 
-That reload is the last step: no restart command follows. The user checks the result with a Wisp task, or Hermes with
-`hermes mcp test wisp`; Hermes can read the log to say how `integrate` ended. Hermes asks the user to send `/restart` in
-the chat only if the chat stays locked, or on macOS. `hermes gateway restart` is for a terminal: Hermes refuses it from
+   The turn that ran the command is lost to the reload, so Hermes answers the chat's next message with "⏸️ This
+   conversation is paused … Send /discard …". The user sends `/discard`, then checks the result with a Wisp task.
+
+No `/new` follows: the chat that asked for the install hands Wisp's tasks to `ask_wisp` from its first message after
+Hermes has connected `wisp`, as every session open then does (a CLI chat connects it at `/reload-mcp`). Hermes can
+check with `hermes mcp test wisp`, and read the log to say how `integrate` ended. In Telegram, `/wisp` and
+`/wisp_model` work typed at once, but reach the command menu only after one `/restart` (and a reopened chat): `connect`
+sets the menu's priority after the reload has registered the menu. Hermes asks the user to send `/restart` in the chat
+for that, if the chat stays locked, or on macOS. `hermes gateway restart` is for a terminal: Hermes refuses it from
 inside a supervised gateway.
 
 `~/.wisp/bin` reaches `PATH` only in new shells, hence the full path. Hermes's MCP servers can be moved into Wisp later,
@@ -179,8 +186,16 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
 - On one machine, the Runtime replaces its own agent token each time a sandboxed Hermes process starts, so a token
   Hermes's model saw before the sandbox stops working. A Hermes process still running unsandboxed (a CLI open since
   before `wisp integrate hermes`) can read the new token as well, until it stops.
+- On macOS, `hermes gateway start`, `stop`, `restart`, `install` and `uninstall` run without Wisp's sandbox: launchd
+  refuses to load the gateway's service from a sandboxed process. They run no model, but they run what Hermes's
+  environment names, the profile's `.env` included, which the sandboxed model can write: a `PATH`, `PYTHONPATH` or
+  `DYLD_*` set there runs outside the sandbox at the next such command, as in any unsandboxed process. The gateway they
+  start is sandboxed at its own start, and one a `restart` runs in its own process (no service installed) is sandboxed
+  before it starts. Started from inside a sandboxed Hermes (its dashboard, or its terminal tool), such a command stays
+  in the sandbox, so launchd refuses it: with the service installed, run it from a terminal.
 - Under Wisp's sandbox, Hermes's browser runs without Chrome's own sandbox: Chrome's cannot start inside Wisp's, so the
-  plugin adds `--no-sandbox` to `AGENT_BROWSER_ARGS`. A Hermes that runs without Wisp's sandbox keeps Chrome's.
+  plugin has Hermes's browser launcher start it with `--no-sandbox` (an older Hermes: added to `AGENT_BROWSER_ARGS`). A
+  Hermes that runs without Wisp's sandbox keeps Chrome's.
 - On Linux, `sudo` and other setuid programs do not work inside the sandboxed Hermes: bubblewrap always sets
   `no_new_privs`, as without it any setuid program inside would regain root and undo the sandbox. Run a command that
   needs root outside Hermes.
@@ -194,17 +209,19 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
   Hermes says Wisp is not answering and does not do Wisp's tasks another way. After a few failed reconnects Hermes parks
   the `wisp` server and retries it only every 5 minutes, so the plugin asks Hermes to reconnect it every 10 seconds:
   once a Runtime on this machine (or its `ssh -L` tunnel) takes connections again, and at each try for a Runtime on
-  another machine. An open session gets `ask_wisp` back from its next message, but a session that started while Wisp
-  was not answering keeps that in its prompt, so start a new one (`/new`). If Wisp is still unavailable in Hermes while
-  `hermes mcp test wisp` succeeds, restart Hermes (`hermes gateway restart`). Under a gateway that serves several
-  profiles, only the default profile is reconnected this way; the others wait for Hermes's own 5-minute retry.
+  another machine. An open session gets `ask_wisp` back from its next message, one that started while Wisp was not
+  answering as well: the plugin tells it at that turn that Wisp answers again, with no `/new`. If Wisp is still
+  unavailable in Hermes while `hermes mcp test wisp` succeeds, restart Hermes (`hermes gateway restart`). Under a
+  gateway that serves several profiles, only the default profile is reconnected this way; the others wait for Hermes's
+  own 5-minute retry.
 - In Telegram, `/wisp` and `/wisp_model` come first in the bot's command menu only after the gateway's next start:
   `hermes wisp connect` (and `wisp integrate hermes`) set the order, but a running gateway sent its menu when it
   started. Send `/restart` in the chat (or run `hermes gateway restart`), then close and reopen the chat: Telegram's
   app keeps the old menu until then. `/wisp` works before that, typed by hand.
 - On Linux, a gateway that enables the plugin while it runs (`wisp integrate hermes` run from Hermes's own terminal)
   restarts into the sandbox in place, and the turn that ran it is lost. Hermes pauses that chat until it is sent
-  `/discard`; no `/restart` is needed. A chat opened in the 30 seconds before stays locked until `/restart`.
+  `/discard`; the chat needs no `/restart`, Telegram's command menu needs one to list `/wisp`. A chat opened in the 30
+  seconds before stays locked until `/restart`.
 - On Windows the plugin is for connecting to a Wisp on another machine. A zone on the same Windows machine is not
   protected: there is no sandbox, and the check on Hermes's tool calls is untested there.
 - On a Windows Hermes, a Confirmation's answer that cannot be sent is reported only when Wisp's stream next speaks.

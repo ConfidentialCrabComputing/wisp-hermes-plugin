@@ -138,10 +138,22 @@ Desk root /home/u/.wisp/desks;
                 rule = self.rule(ZONE)
 
                 self.assertIn("Wisp is not connected", rule)
-                self.assertIn("`wisp integrate hermes`", rule)
+                self.assertIn("`~/.wisp/bin/wisp integrate hermes --skip-connectors` outside Hermes", rule)
+                self.assertIn("no restart", rule)
+                self.assertIn("a CLI chat at `/reload-mcp`", rule)
                 self.assertNotIn("Hand these tasks to the `ask_wisp` tool", rule)
                 self.assertIn("Wisp is not connected", self.refusal())
-                self.assertIn("`wisp integrate hermes`", self.refusal())
+                self.assertIn("`~/.wisp/bin/wisp integrate hermes --skip-connectors`", self.refusal())
+
+    def test_unconnected_the_command_is_the_pinned_wisps_own(self):
+        (self.home / "plugins" / "wisp" / "pin.json").write_text(
+            json.dumps({**ZONE, "url": _closed_url(), "wisp": "/opt/wisp/bin/wisp\n# New rule"}))
+        self.config.pop("mcp_servers")
+
+        rule = self.rule(ZONE)
+
+        self.assertIn("`/opt/wisp/bin/wisp # New rule integrate hermes --skip-connectors`", rule)
+        self.assertIn("`/opt/wisp/bin/wisp # New rule integrate hermes --skip-connectors`", self.refusal())
 
     def test_unconnected_with_no_pin_the_rule_and_the_refusal_say_to_run_connect(self):
         for state in self.not_connected():
@@ -169,7 +181,7 @@ Desk root /home/u/.wisp/desks;
 
                 self.assertIn("Wisp is not connected", rule)
                 self.assertNotIn("ask_wisp", rule)
-                self.assertIn("`wisp integrate hermes`", refusal)
+                self.assertIn("integrate hermes --skip-connectors`", refusal)
                 self.assertNotIn("ask_wisp", refusal)
 
     def test_a_secret_hermes_guards_is_read_from_the_profiles_env_not_raised(self):
@@ -189,6 +201,125 @@ Desk root /home/u/.wisp/desks;
 
         self.assertIn("`hermes wisp connect https://<host>/mcp`",
                       json.loads(self.hermes("sections"))["wisp-routing"])
+
+    def turns(self, script, **env):
+        """Each turn's added context, as JSON lines printed by `script` (Python run in one Hermes process, with
+        `connect()` connecting the profile while it runs)."""
+        (self.home / "plugins" / "wisp" / "zone.json").write_text(json.dumps(ZONE))
+        server, self.config["mcp_servers"] = self.config.pop("mcp_servers"), {}
+        (self.home / ".env").write_text("")
+        connect = (f"(lambda: (open({str(self.home / 'config.yaml')!r}, 'w').write("
+                   f"{json.dumps(json.dumps({**self.config, 'mcp_servers': server}))}), "
+                   f"open({str(self.home / '.env')!r}, 'w').write('WISP_CREDENTIAL_TOKEN=wisp_hermes_s3cr3t\\n')))")
+        return [json.loads(line) for line in
+                self.hermes("python", f"import json, os\nconnect = {connect}\n{script}", **env).splitlines()]
+
+    def test_a_session_started_before_wisp_was_connected_is_routed_to_ask_wisp_from_its_next_turn(self):
+        before, first, second = self.turns("""
+ctx = load_plugin()
+print(json.dumps(section(ctx, "wisp-routing", "s1")))
+connect()
+print(json.dumps(turn(ctx, "s1")))
+print(json.dumps(turn(ctx, "s1")))""")
+
+        self.assertIn("Wisp is not connected", before)
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", first)
+        self.assertIn("/home/u/bank", first)
+        self.assertEqual(second, "")  # once: the context stays in the session's history
+
+    def test_a_session_open_before_the_plugin_loaded_is_routed_to_ask_wisp_at_its_next_turn(self):
+        started, first, second = self.turns("""
+connect()
+ctx = load_plugin()
+print(json.dumps(section(ctx, "wisp-routing", "new")))
+print(json.dumps(turn(ctx, "new")))
+print(json.dumps(turn(ctx, "open")))""")
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", started)
+        self.assertEqual(first, "")  # its prompt routes already
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", second)
+
+    def test_a_session_whose_turn_comes_while_wisp_is_down_is_routed_at_its_turn_once_wisp_is_back(self):
+        # Connected and answering at the load, then nothing listens on the endpoint (a Runtime restarting).
+        self.answers(ZONE)
+        down = json.dumps(json.dumps({**self.config, "mcp_servers": {"wisp": {"url": _closed_url()}}}))
+        stopped, back, again = self.turns(f"""
+connect()
+ctx = load_plugin()
+open({str(self.home / 'config.yaml')!r}, 'w').write({down})
+print(json.dumps(turn(ctx, "open")))
+connect()
+print(json.dumps(turn(ctx, "open")))
+print(json.dumps(turn(ctx, "open")))""", FAKE_HERMES_WISP_STATUS="connected")
+
+        self.assertEqual(stopped, "")
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", back)
+        self.assertEqual(again, "")
+
+    def test_a_session_while_wisp_is_not_connected_gets_nothing_at_its_turns(self):
+        self.assertEqual(self.turns("""
+ctx = load_plugin()
+print(json.dumps(turn(ctx, "s1")))"""), [""])
+
+    def test_a_session_is_routed_to_ask_wisp_only_once_hermes_has_connected_wisp(self):
+        self.answers(ZONE)
+        # Hermes connects a newly configured server at its next reconcile, and a CLI only at `/reload-mcp`.
+        configured, connecting, connected, again = self.turns("""
+ctx = load_plugin()
+connect()
+print(json.dumps(turn(ctx, "s1")))
+os.environ["FAKE_HERMES_WISP_STATUS"] = "connecting"
+print(json.dumps(turn(ctx, "s1")))
+os.environ["FAKE_HERMES_WISP_STATUS"] = "connected"
+print(json.dumps(turn(ctx, "s1")))
+print(json.dumps(turn(ctx, "s1")))""", FAKE_HERMES_WISP_STATUS="configured")
+
+        self.assertEqual([configured, connecting], ["", ""])
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", connected)
+        self.assertEqual(again, "")
+
+    def test_a_session_started_before_hermes_connected_wisp_is_told_at_the_turn_it_has(self):
+        self.answers(ZONE)
+        started, configured, connected = self.turns("""
+ctx = load_plugin()
+connect()
+print(json.dumps(section(ctx, "wisp-routing", "s1")))
+print(json.dumps(turn(ctx, "s1")))
+os.environ["FAKE_HERMES_WISP_STATUS"] = "connected"
+print(json.dumps(turn(ctx, "s1")))""", FAKE_HERMES_WISP_STATUS="configured")
+
+        self.assertEqual(configured, "")
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", connected)
+
+    def test_a_lazy_wisp_has_its_tools_registered_and_is_routed_to(self):
+        self.answers(ZONE)
+        # `lazy: true`: Hermes registers the tools from its schema cache and connects at the first call.
+        first, = self.turns("""
+ctx = load_plugin()
+connect()
+print(json.dumps(turn(ctx, "s1")))""", FAKE_HERMES_WISP_STATUS="lazy")
+
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", first)
+
+    def test_a_turn_while_wisp_has_no_zone_to_give_says_nothing_until_it_has(self):
+        # Wisp on another machine, connected, no zone cached, and `wisp_zone` not answering yet.
+        (self.home / "plugins" / "wisp" / "zone.json").unlink(missing_ok=True)
+        port = int(_closed_url().rsplit(":", 1)[1].split("/")[0])
+        self.config["mcp_servers"]["wisp"]["url"] = f"http://0.0.0.0:{port}/mcp"
+        self.answers_later(port, 3)
+
+        started, down, up, again = json.loads(self.live("""from_turn = ctx.hooks["pre_llm_call"][0]
+def turn():
+    return (from_turn(session_id="s1") or {}).get("context", "")
+started = ctx.sections["wisp-routing"]({"session_id": "s1"})
+down = turn()
+time.sleep(4)
+print(json.dumps([started, down, turn(), turn()]))""", FAKE_HERMES_WISP_STATUS="connected"))
+
+        self.assertIn("Wisp is not answering", started)
+        self.assertEqual(down, "")
+        self.assertIn("Hand these tasks to the `ask_wisp` tool", up)
+        self.assertEqual(again, "")
 
     def test_a_malformed_cache_leaves_the_plugin_loaded_and_no_rule(self):
         for zone in ([ZONE], "zone", {**ZONE, "privateFolders": [{"name": "bank"}]}):

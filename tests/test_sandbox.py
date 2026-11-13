@@ -333,9 +333,22 @@ for path in ({str(self.plugin / "__init__.py")!r}, {str(self.plugin / "zone.json
                 done = self.python("""
 import os
 load_plugin()
-print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARGS", *([] if before is None else [f"AGENT_BROWSER_ARGS={before}"])))
+from tools import browser_launcher
+print(os.environ.get("AGENT_BROWSER_ARGS"), browser_launcher.needs_chromium_sandbox_bypass())""", ("env", "-u", "AGENT_BROWSER_ARGS", *([] if before is None else [f"AGENT_BROWSER_ARGS={before}"])))
 
-                self.assertEqual(done.stdout.strip(), after)
+                self.assertEqual(done.stdout.split(), [after, "True"])
+
+    @macos
+    def test_a_hermes_started_inside_the_sandbox_runs_the_browser_without_chromes_own_sandbox(self):
+        done = self.python(f"""
+import os, subprocess, sys
+load_plugin()
+subprocess.run([sys.executable, {str(FAKE / "hermes")!r}, "python",
+                "load_plugin(); from tools import browser_launcher; print(browser_launcher.needs_chromium_sandbox_bypass())"],
+               env=os.environ, check=True)""")
+
+        self.assertEqual(done.stdout.split(), ["True"], done.stderr)
+        self.assertNotIn(UNPROTECTED, done.stderr)
 
     def test_wisp_on_another_machine_applies_no_sandbox_and_warns_nothing(self):
         shutil.rmtree(self.data_dir)
@@ -352,6 +365,52 @@ print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARG
         self.assertIn(UNPROTECTED, stderr)
         self.assertIn(str(self.data_dir), stderr)
 
+    def protect_twice(self, second_zone, second_plugin):
+        """`protect`'s warnings at a second call in one process, the first with this zone, and its stderr; as a gateway
+        that serves two profiles loads the plugin once for each."""
+        done = subprocess.run([sys.executable, "-c", f"""
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("sandbox", {str(self.plugin / "sandbox.py")!r})
+sandbox = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sandbox)
+assert sandbox.protect({self.zone!r}, {str(self.plugin)!r}, {str(self.home)!r}) == []
+print(json.dumps(sandbox.protect({second_zone!r}, {str(second_plugin)!r}, {str(self.home)!r})))"""],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout), done.stderr
+
+    @macos
+    def test_a_second_protect_in_a_sandboxed_process_warns_only_of_what_it_can_reach(self):
+        taxes = self.tmp / "taxes"
+        taxes.mkdir()
+        (taxes / "2025.pdf").write_text("taxes")
+        other_plugin = self.tmp / "work" / "plugins" / "wisp"
+        other_plugin.mkdir(parents=True)
+
+        self.assertEqual(self.protect_twice(self.zone, self.plugin), ([], ""))
+        added = {**self.zone, "privateFolders": [*self.zone["privateFolders"], {"path": str(taxes)}]}
+        warnings, _ = self.protect_twice(added, self.plugin)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(UNPROTECTED, warnings[0])
+        self.assertIn(str(taxes), warnings[0])
+        key = self.tmp / "master.key"
+        key.write_text("root key")
+        warnings, _ = self.protect_twice({**self.zone, "secretFiles": [str(key)]}, self.plugin)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(str(key), warnings[0])
+        warnings, stderr = self.protect_twice(self.zone, other_plugin)
+        self.assertEqual(stderr, "")
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(UNPROTECTED, warnings[0])
+        self.assertIn(str(other_plugin), warnings[0])
+        # Its folder read-only, a file in it still takes writes.
+        (other_plugin / "__init__.py").write_text("")
+        other_plugin.chmod(0o555)
+        self.addCleanup(other_plugin.chmod, 0o755)
+        warnings, _ = self.protect_twice(self.zone, other_plugin)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(str(other_plugin), warnings[0])
+
     @macos
     def test_a_failed_sandbox_start_leaves_chromes_own_sandbox_on(self):
         for before in ([], ["AGENT_BROWSER_ARGS=--lang=de"]):
@@ -359,11 +418,47 @@ print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARG
                 done = self.python("""
 import os
 load_plugin()
-print(os.environ.get("AGENT_BROWSER_ARGS"))""", ("env", "-u", "AGENT_BROWSER_ARGS", *before,
+from tools import browser_launcher
+print(os.environ.get("AGENT_BROWSER_ARGS"), browser_launcher.needs_chromium_sandbox_bypass())""", ("env", "-u", "AGENT_BROWSER_ARGS", *before,
                  "sandbox-exec", "-p", "(version 1)(allow default)"))
 
                 self.assertIn(UNPROTECTED, done.stderr)
-                self.assertEqual(done.stdout.strip(), "--lang=de" if before else "None")
+                self.assertEqual(done.stdout.split(), ["--lang=de" if before else "None", "False"])
+
+    def probe(self, *argv, **env):
+        """What the fake `hermes` with these arguments says of reading a zone file, line by line."""
+        done = self.hermes(*argv, wrap=("env", f"FAKE_HERMES_PROBE={self.bank / 'secret.txt'}",
+                                        *(f"{name}={value}" for name, value in env.items())))
+        return done.stdout.split(), done.stderr
+
+    @macos
+    def test_a_command_that_manages_the_gateway_service_runs_unsandboxed_and_warns_nothing(self):
+        # launchd refuses `launchctl bootstrap` from any sandboxed process.
+        for argv in (["gateway", "start"], ["gateway", "stop"], ["gateway", "restart", "--all"], ["gateway", "install"],
+                     ["gateway", "uninstall"], ["-p", "coder", "gateway", "restart"]):
+            with self.subTest(argv=argv):
+                if argv[0] == "-p":
+                    shutil.copytree(self.home, self.home / "profiles" / "coder", ignore=shutil.ignore_patterns("profiles"))
+                    (self.home / "profiles" / "coder" / "plugins" / "wisp" / "zone.json").write_text(json.dumps(self.zone))
+                said, stderr = self.probe(*argv)
+
+                self.assertEqual(said, ["service:", "read"])
+                self.assertNotIn(UNPROTECTED, stderr)
+
+    @sandboxed
+    def test_a_gateway_run_and_the_gateway_a_service_command_runs_in_its_own_process_are_sandboxed(self):
+        self.assertEqual(self.probe("gateway", "run")[0], ["gateway:", "refused"])
+        said, stderr = self.probe("gateway", "restart", "--all", FAKE_HERMES_NO_SERVICE="1")
+        self.assertEqual(said[-2:], ["gateway:", "refused"])
+        self.assertNotIn(UNPROTECTED, stderr)
+
+    @macos
+    def test_a_plugin_the_gateway_of_a_service_command_loads_as_it_starts_sandboxes_it(self):
+        # A served profile's plugins, under a gateway whose own profile has none: the service command was asked already.
+        said, stderr = self.probe("gateway", "restart", "--all", FAKE_HERMES_NO_SERVICE="1", FAKE_HERMES_SERVED="1")
+
+        self.assertEqual(said, ["service:", "read", "gateway:", "refused"])
+        self.assertNotIn(UNPROTECTED, stderr)
 
     @linux
     @sandboxed
@@ -1182,6 +1277,69 @@ class Pin(HermesHome):
         self.assertIn(UNPROTECTED, done.stderr)
         self.assertEqual(self.called, ["wisp_zone"])
 
+    @macos
+    def test_a_command_that_manages_the_gateway_service_never_asks_to_replace_the_token(self):
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+
+        done = self.hermes("gateway", "restart", "--all")
+
+        self.assertEqual(self.called, ["wisp_zone"], done.stderr)
+
+    @macos
+    def test_the_gateway_a_service_command_runs_in_its_own_process_has_the_token_replaced_and_is_told_it_is_closed(self):
+        # Hermes's fallback with no service installed: the gateway runs in the service command's process, sandboxed.
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+
+        done = self.python("""
+import sys
+sys.argv[1:] = ["gateway", "restart", "--all"]
+ctx = load_plugin()
+from hermes_cli import gateway
+gateway.run_gateway(replace=True)
+print(section(ctx, "wisp-routing", "s1"))""", wrap=("env", f"FAKE_HERMES_PROBE={self.bank / 'secret.txt'}"))
+
+        self.assertIn("gateway: refused", done.stdout)
+        self.assertEqual(self.called[:2], ["wisp_zone", "wisp_sealed"], done.stderr)
+        self.assertEqual(self.called.count("wisp_sealed"), 1, done.stderr)
+        self.assertIn("you cannot reach them", done.stdout)
+
+    @macos
+    def test_the_gateway_a_service_command_runs_inside_the_sandbox_runs_the_browser_without_chromes_own_sandbox(self):
+        # A gateway restarted from a sandboxed Hermes's dashboard, with no service installed: it runs in that process.
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank]))
+        restart = ('import sys\nsys.argv[1:] = ["gateway", "restart", "--all"]\nctx = load_plugin()\n'
+                   'from hermes_cli import gateway\ngateway.run_gateway(replace=True)\n'
+                   'from tools import browser_launcher\nprint(browser_launcher.needs_chromium_sandbox_bypass())\n'
+                   'print(section(ctx, "wisp-routing", "s1"))')
+        done = self.python(f"""
+import os, subprocess, sys
+load_plugin()
+subprocess.run([sys.executable, {str(FAKE / "hermes")!r}, "python", {restart!r}], env=os.environ, check=True)""",
+                           wrap=("env", f"FAKE_HERMES_PROBE={self.bank / 'secret.txt'}"))
+
+        self.assertIn("gateway: refused\nTrue\n", done.stdout, done.stderr)
+        self.assertIn("you cannot reach them", done.stdout)
+        self.assertNotIn(UNPROTECTED, done.stderr)
+        self.assertEqual(self.called.count("wisp_sealed"), 2, done.stderr)
+
+    @macos
+    def test_the_gateway_a_service_command_runs_with_a_folder_left_out_is_not_told_it_is_closed(self):
+        # A Private Folder holding Hermes's home is left out of the sandbox, as at any other start.
+        self.pin["url"] = self.endpoint(self.valid_zone([self.bank, self.tmp]))
+
+        done = self.python("""
+import sys
+sys.argv[1:] = ["gateway", "restart", "--all"]
+ctx = load_plugin()
+from hermes_cli import gateway
+gateway.run_gateway(replace=True)
+print(section(ctx, "wisp-routing", "s1"))""", wrap=("env", f"FAKE_HERMES_PROBE={self.bank / 'secret.txt'}"))
+
+        self.assertIn("gateway: refused", done.stdout)
+        self.assertNotIn("wisp_sealed", self.called, done.stderr)
+        self.assertIn("this Hermes is not sandboxed from them", done.stdout)
+        self.assertNotIn("you cannot reach them", done.stdout)
+
     @sandboxed
     def test_a_start_without_a_pin_never_asks_to_replace_the_token(self):
         self.pin = None
@@ -1872,6 +2030,19 @@ print(sandbox._has_terminal())"""], start_new_session=True, capture_output=True,
 
         self.assertEqual(done.stdout.strip(), "False")
 
+    def test_a_folder_holding_only_the_way_to_a_denied_one_deeper_inside_is_not_read(self):
+        # What a tmpfs over `outer` holds once bubblewrap has made the mount point of a denied folder two levels in.
+        outer = Path(os.path.realpath(tempfile.mkdtemp(prefix="wisp-hermes-reads-")))
+        self.addCleanup(shutil.rmtree, outer)
+        inner = outer / "finance" / "taxes"
+        inner.mkdir(parents=True)
+        denied = [str(outer), str(inner)]
+
+        self.assertFalse(self.sandbox._reads(str(outer), denied))
+
+        (outer / "finance" / "report.txt").write_text("left in reach")
+        self.assertTrue(self.sandbox._reads(str(outer), denied))
+
 
 class TerminalWarning(unittest.TestCase):
     """What the kernel's `dev.tty.legacy_tiocsti` says of `TIOCSTI`, from a stand-in for its file."""
@@ -1900,14 +2071,15 @@ class TerminalWarning(unittest.TestCase):
 @sandboxed
 class Supervisor(HermesHome):
     """The process Hermes was started as, once the sandboxed Hermes runs: `HANDLERS` make a Hermes that says each
-    signal it gets on stdout and exits 7 on `SIGTERM`."""
+    signal it gets on stdout and exits 7 on `SIGTERM`. With `os.write`: a `print` in a handler that comes while
+    the main thread is still flushing its own raises `RuntimeError: reentrant call`, and that Hermes exits 1."""
 
     HANDLERS = """
 import os, signal, sys
 load_plugin()
 for s in (signal.SIGINT, signal.SIGQUIT, signal.SIGHUP, signal.SIGUSR1, signal.SIGUSR2):
-    signal.signal(s, lambda n, _: print(signal.Signals(n).name, flush=True))
-signal.signal(signal.SIGTERM, lambda n, _: (print("SIGTERM", flush=True), os._exit(7)))
+    signal.signal(s, lambda n, _: os.write(1, f"{signal.Signals(n).name}\\n".encode()))
+signal.signal(signal.SIGTERM, lambda n, _: (os.write(1, b"SIGTERM\\n"), os._exit(7)))
 """
     SERVE = """
 print("up", os.getpid(), flush=True)

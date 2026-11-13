@@ -12,7 +12,7 @@ from pathlib import Path
 from . import commands, connect
 from .hook import make_hook
 from .mcp_client import call_tool, loopback, refuses
-from .sandbox import UNPROTECTED, protect
+from .sandbox import SERVICE_COMMAND, UNPROTECTED, protect
 from .zone import (PIN, ZONE_CACHE, down_rule, load_pin, load_zone, not_answering, not_connected, not_connected_rule,
                    pinned_zone, rejected, routing_rule, SESSION_TIMEOUT, session_rule)
 
@@ -88,6 +88,11 @@ def register(ctx):
     refusal = getattr(revival, "refusal", None) or [None]
     # Whether this process had the Runtime replace its agent token, kept on the same thread for the same reason.
     sealed = getattr(revival, "sealed", False)
+    # The ids of the sessions this process gave a connected rule, at their start or a turn, kept on the same thread so a
+    # reload does not give them it again.
+    routed = getattr(revival, "routed", None)
+    if routed is None:
+        routed = set()
 
     def hermes_wisp():
         """Hermes's MCP client's view of `wisp`: None while it answers (or with no client loaded: only a Hermes that
@@ -174,7 +179,7 @@ def register(ctx):
     live = False  # the pinned endpoint answered `wisp_zone` at this start, not the cache
     rule = ""
     protected = False
-    sandboxed = False  # `protect` ran at this start with no "unprotected" warning; no running process changes it
+    sandboxed = False  # `protect` sandboxed this start, saying nothing "unprotected", or the gateway a service command runs
     start_closed = False  # what the start's rule says of Wisp's files; with no rule, nothing closed them
 
     def closed(url):
@@ -182,11 +187,40 @@ def register(ctx):
         machine."""
         return sandboxed or not loopback(url)
 
+    def seal():
+        """Sandboxed now, beside the Runtime that answered at this start: the agent token read before could reach the
+        model, so the Runtime replaces it. Every such start asks, so the last replacement is one asked from inside a
+        sandbox. A load again in a process whose replacement succeeded asks no more: a client holding the token it was
+        just given keeps it. One that never had it replaced (its loads ran on the cache, unsandboxed, or the ask failed)
+        asks. Bubblewrap's child is a new process, so it asks."""
+        nonlocal sealed
+        if not live or sealed:
+            return
+        try:
+            call_tool(pin["url"], credential(), "wisp_sealed")
+            sealed = True
+        except Exception as exc:  # noqa: BLE001 — the token stays as it was; the start goes on
+            logger.warning("Wisp: could not have the Runtime replace its agent token: %r", exc)
+        if revival is not None:
+            revival.sealed = sealed
+
+    def gateway_sandboxed():
+        """The gateway a service command runs in this process is sandboxed now, before it starts: its sessions are told
+        Wisp's files are out of reach, and the Runtime replaces the token."""
+        nonlocal sandboxed, start_closed, rule
+        sandboxed = start_closed = True
+        try:
+            rule = routing_rule(zone, closed=True)
+            seal()
+        except Exception as exc:  # noqa: BLE001 — never a gateway that fails to start
+            logger.warning("Wisp: could not take the gateway's sandbox in: %r", exc)
+
     try:
         pin = load_pin(PIN)
         if pin is not None:
             # Pinned, the URL is integrate's (Hermes's model can repoint `config.yaml`'s at its own endpoint), and the pin
             # alone is a zone: whatever fails in reading more, the sandbox, the hook and the rule have it.
+            pinned = pin.get("wisp") or True  # the not-connected text names the pinned `wisp`
             zone, live = pinned_zone(pin, credential, ZONE_CACHE)
         else:
             url = ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
@@ -201,33 +235,61 @@ def register(ctx):
             # After the zone is cached: the sandbox denies writes beside the plugin.
             # On Linux, sandboxed, the process is re-exec'd under bubblewrap here, through the pinned `wisp`.
             warnings = protect(zone, Path(__file__).resolve().parent, get_config_path().parent,
-                               pinned=pin, wisp=(pin or {}).get("wisp"))
+                               pinned=pin, wisp=(pin or {}).get("wisp"), sandboxed_later=gateway_sandboxed)
             for warning in warnings:
                 _warn(warning)
             protected = True
-            sandboxed = not any(warning.startswith(UNPROTECTED) for warning in warnings)
+            sandboxed = not any(warning.startswith((UNPROTECTED, SERVICE_COMMAND)) for warning in warnings)
             start_closed = closed(pin["url"] if pin else url)
             rule = routing_rule(zone, closed=start_closed)
-            if live and not sealed and sandboxed:
-                # Sandboxed now, beside the Runtime that just answered: the agent token read before this start could
-                # reach the model, so the Runtime replaces it. Every such start asks, so the last replacement is one
-                # asked from inside a sandbox. A load again in a process whose replacement succeeded asks no more: a
-                # client holding the token it was just given keeps it. One that never had it replaced (its loads ran
-                # on the cache, unsandboxed, or the ask failed) asks. Bubblewrap's child is a new process, so it asks.
-                try:
-                    call_tool(pin["url"], credential(), "wisp_sealed")
-                    sealed = True
-                except Exception as exc:  # noqa: BLE001 — the token stays as it was; the start goes on
-                    logger.warning("Wisp: could not have the Runtime replace its agent token: %r", exc)
+            if sandboxed:
+                seal()
     except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, never a failed load
         logger.warning("Wisp: no routing rule, the zone is malformed: %r", exc)
         if not protected and pinned:
             _warn(f"{UNPROTECTED}: the pin or the zone is malformed, so Hermes is not sandboxed")
 
-    def section(_session):
+    def has_tools():
+        """Whether Hermes lists `ask_wisp` now: it connected `wisp`, or registered a lazy one's tools from its cache, or
+        has no MCP client to say. A server configured since connects at a gateway's next reconcile, in a CLI only at
+        `/reload-mcp`. Unsure is not yet: a later turn asks again."""
+        try:
+            discovery = sys.modules.get("tools.mcp_tool_discovery")
+            if discovery is None:
+                return True
+            entry = (read_raw_config().get("mcp_servers") or {}).get("wisp") or {}
+            return any(status.get("name") == "wisp" and status.get("status") in ("connected", "lazy")
+                       for status in discovery.get_mcp_status({"wisp": entry}))
+        except Exception as exc:  # noqa: BLE001 — unsure is not yet
+            logger.debug("Wisp: could not tell whether Hermes lists ask_wisp: %r", exc)
+            return False
+
+    def section(session):
         """Rendered into each new session's prompt, so it says the state Wisp is in then; blank, Hermes leaves it out."""
+        text, routes = rule_now()
+        if routes and has_tools():
+            routed.add(session.get("session_id"))
+        return text
+
+    def turn(session_id=None, **_):
+        """At each turn: the rule as of now for a session whose prompt has no connected rule (it started before this
+        load, or while Wisp was not connected, not answering or not listed yet) once Hermes lists `ask_wisp` and Wisp
+        answers; once per session, as the context stays in its history. Hermes fixes a session's prompt section at its
+        start, so only a turn can tell it.
+        ponytail: a session id Hermes rotates on compression, or a process restarted under an open session, gets the
+        rule once more."""
+        if session_id in routed or not has_tools():
+            return None
+        text, routes = rule_now()
+        if not routes:
+            return None
+        routed.add(session_id)
+        return {"context": f"Wisp is connected and answering now; this rule replaces any earlier one about Wisp:\n{text}"}
+
+    def rule_now():
+        """The rule as of now, and whether it routes to `ask_wisp` (Wisp connected and answering)."""
         if unconnected():
-            return not_connected_rule(pinned)
+            return not_connected_rule(pinned), False
         why = down()
         if zone is None and not pinned:
             # No zone at the load (connected since, or Wisp down then): asked again for each session, at the URL as of
@@ -238,22 +300,25 @@ def register(ctx):
                 # With Wisp down, the cache alone: the endpoint is not asked.
                 now = load_zone(None if why else url, credential(), ZONE_CACHE, SESSION_TIMEOUT)
                 if now is None:
-                    return down_rule(None, why or not_answering(), closed(url)) if url else ""
-                return down_rule(now, why, closed(url)) if why else routing_rule(now, closed=closed(url))
+                    return (down_rule(None, why or not_answering(), closed(url)) if url else ""), False
+                if why:
+                    return down_rule(now, why, closed(url)), False
+                return routing_rule(now, closed=closed(url)), True
             except Exception as exc:  # noqa: BLE001 — a zone of any wrong shape leaves no rule, as at a load
                 logger.warning("Wisp: no routing rule, the zone is malformed: %r", exc)
-                return ""
+                return "", False
         if not rule:
-            return down_rule(None, why, start_closed) if why else rule
+            return (down_rule(None, why, start_closed) if why else rule), False
         try:
             # The Connectors as of now: `wisp connectors auth` while Hermes runs needs no restart.
             url = pin["url"] if pin else ((read_raw_config().get("mcp_servers") or {}).get("wisp") or {}).get("url")
-            return session_rule(zone, url, credential(), ZONE_CACHE, why, start_closed)
+            return session_rule(zone, url, credential(), ZONE_CACHE, why, start_closed), not why
         except Exception as exc:  # noqa: BLE001 — the start's rule then, one that raises Hermes skips
             logger.warning("Wisp: could not read the Connectors as of now: %r", exc)
-            return down_rule(zone, why, start_closed) if why else rule
+            return (down_rule(zone, why, start_closed) if why else rule), not why
 
     ctx.register_system_prompt_section("wisp-routing", section)
+    ctx.register_hook("pre_llm_call", turn)
     # Built here, not per call: a hook that raises blocks every tool call (Hermes fails closed).
     config_path = get_config_path()
     try:
@@ -270,5 +335,6 @@ def register(ctx):
     if revival is None:
         revival = threading.Thread(target=revive, name="wisp-revive", daemon=True)
         revival.refusal = refusal
+        revival.routed = routed
         revival.start()
     revival.sealed = sealed
