@@ -231,10 +231,18 @@ def _release_own_chats():
     chat's holder for alive while its PID and start time are, and the supervisor keeps both: a chat open when the
     plugin loads under a running gateway (enabled live) would stay locked to the sandboxed Hermes until a restart.
     At a cold start this process holds none. Never an exception: the re-exec goes on either way.
-    ponytail: Hermes's own sweep keeps a chat opened in its last 30 seconds; such a chat still needs `/restart`."""
+    Hermes's sweep keeps a lease started in its last `_SELF_ORPHAN_GRACE_SECONDS`, against a finalize racing a lease
+    not yet attached; no thread survives the exec, so no such race, and a chat opened seconds ago goes too."""
     try:
-        from hermes_cli.active_sessions import release_orphaned_leases
-        release_orphaned_leases(set())
+        from hermes_cli import active_sessions
+        grace = getattr(active_sessions, "_SELF_ORPHAN_GRACE_SECONDS", None)
+        if grace is not None:
+            active_sessions._SELF_ORPHAN_GRACE_SECONDS = float("-inf")
+        try:
+            active_sessions.release_orphaned_leases(set())
+        finally:
+            if grace is not None:
+                active_sessions._SELF_ORPHAN_GRACE_SECONDS = grace
     except Exception as exc:  # noqa: BLE001 — an older or rewritten Hermes costs the re-exec nothing
         logging.getLogger(__name__).warning("Wisp: could not release this process's open chats: %r", exc)
 
