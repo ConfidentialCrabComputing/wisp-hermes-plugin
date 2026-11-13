@@ -406,6 +406,14 @@ def _in_a_sandbox():
     return libc.sandbox_check(os.getpid(), None, 0) == 1
 
 
+def in_the_sandbox(plugin_dir):
+    """Whether this process runs in a sandbox already, as the kernel says: macOS any sandbox, Linux one with
+    `plugin_dir` (real) bound read-only."""
+    if sys.platform == "darwin":
+        return _in_a_sandbox()
+    return sys.platform == "linux" and bool(_sandboxed([], plugin_dir))
+
+
 def _manages_the_service(argv):
     """Whether Hermes's arguments `argv` are a `hermes gateway` command that only manages the service, a profile named
     before it or not. Anything else before `gateway` keeps the sandbox."""
