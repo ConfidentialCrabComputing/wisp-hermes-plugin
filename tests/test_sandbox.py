@@ -1313,6 +1313,29 @@ class Pin(HermesHome):
 
         self.assertEqual(self.called.count("wisp_sealed"), 2, done.stderr)
 
+    @sandboxed
+    def test_the_zone_is_cached_before_the_sandbox_and_a_load_inside_it_says_nothing_of_the_cache(self):
+        # A Hermes started inside the sandboxed one (on Linux bubblewrap's re-exec is one too) cannot write the cache.
+        answer = self.valid_zone([self.bank])
+        self.pin["url"] = self.endpoint(answer)
+
+        done = self.python(f"""
+import subprocess, sys
+load_plugin()
+child = subprocess.run([sys.executable, {str(FAKE / "hermes")!r}, "python", "load_plugin()"], capture_output=True, text=True)
+sys.stderr.write(child.stderr)""")
+
+        self.assertEqual(json.loads((self.plugin / "zone.json").read_text()), answer)
+        self.assertNotIn("could not cache", done.stderr)
+
+    def test_a_cache_an_unsandboxed_start_cannot_write_is_warned_of(self):
+        elsewhere = self.tmp / "elsewhere"
+        self.pin = {**self.pin, "dataDir": str(elsewhere), "deskRoot": str(elsewhere / "desks"), "privateFolders": []}
+        self.pin["url"] = self.endpoint({**self.pin, "services": []})
+        (self.plugin / "zone.json").mkdir()
+
+        self.assertIn("could not cache the zone", self.python("load_plugin()").stderr)
+
     def test_an_unsandboxed_start_never_asks_to_replace_the_token(self):
         elsewhere = self.tmp / "elsewhere"
         self.pin = {**self.pin, "dataDir": str(elsewhere), "deskRoot": str(elsewhere / "desks"), "privateFolders": []}
