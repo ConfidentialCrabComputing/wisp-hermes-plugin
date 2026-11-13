@@ -214,6 +214,10 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
   unavailable in Hermes while `hermes mcp test wisp` succeeds, restart Hermes (`hermes gateway restart`). Under a
   gateway that serves several profiles, only the default profile is reconnected this way; the others wait for Hermes's
   own 5-minute retry.
+- In Telegram, `/wisp` and `/wisp_model` come first in the bot's command menu only after the gateway's next start:
+  `hermes wisp connect` (and `wisp integrate hermes`) set the order, but a running gateway sent its menu when it
+  started. Send `/restart` in the chat (or run `hermes gateway restart`), then close and reopen the chat: Telegram's
+  app keeps the old menu until then. `/wisp` works before that, typed by hand.
 - On Linux, a gateway that enables the plugin while it runs (`wisp integrate hermes` run from Hermes's own terminal)
   restarts into the sandbox in place, and the turn that ran it is lost. Hermes pauses that chat until it is sent
   `/discard`; the chat needs no `/restart`, Telegram's command menu needs one to list `/wisp`. A chat opened in the 30
