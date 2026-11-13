@@ -250,6 +250,33 @@ def _release_own_chats():
         logging.getLogger(__name__).warning("Wisp: could not release this process's open chats: %r", exc)
 
 
+def _release_own_leases():
+    """This process's turn leases and compression locks in Hermes's `state.db`, let go before it becomes the
+    supervisor. Hermes reclaims such a row before its TTL only when the holder's PID is provably dead, and the
+    supervisor keeps the PID: the turn the re-exec cuts would hold its chat for up to its TTL. No thread survives the
+    exec, so every row naming this PID (in this PID namespace, as Hermes reads a holder) is an orphan. Never an
+    exception: the re-exec goes on either way."""
+    try:
+        from hermes_state import SessionDB, holder_pid_checkable
+
+        def mine(holder):
+            match = re.search(r"(?:^|:)pid=(\d+)(?::|$)", holder or "")
+            return match is not None and int(match.group(1)) == os.getpid() and holder_pid_checkable(holder)
+
+        def release(conn):
+            for table in ("session_turn_leases", "compression_locks"):
+                holders = {row[0] for row in conn.execute(f"SELECT holder FROM {table}")}
+                conn.executemany(f"DELETE FROM {table} WHERE holder = ?", [(h,) for h in holders if mine(h)])
+
+        db = SessionDB()
+        try:
+            db._execute_write(release)
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001 — an older or rewritten Hermes costs the re-exec nothing
+        logging.getLogger(__name__).warning("Wisp: could not release this process's turn leases: %r", exc)
+
+
 def _reexec(denied, plugin_dirs, wisp):
     """Linux: this Hermes started again under bubblewrap, with the arguments `wisp sandbox-exec` prints, and this
     process, keeping its PID, turned into the supervisor (`supervise.py`); the reason it could not or a folder was
@@ -316,6 +343,7 @@ def _reexec(denied, plugin_dirs, wisp):
     if notify is not None:
         os.set_inheritable(notify.fileno(), True)
     _release_own_chats()
+    _release_own_leases()
     try:
         # `-I` drops `PYTHON*`, not the loader's variables. Its `NOTIFY_SOCKET` stays systemd's own.
         os.execve(sys.executable, [sys.executable, "-I", "-S", os.path.join(plugin_dir, "supervise.py"),

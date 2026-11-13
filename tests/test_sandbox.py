@@ -13,12 +13,14 @@ import random
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1914,6 +1916,48 @@ class LiveLoad(unittest.TestCase):
             sandbox._reexec(["/zone/a"], ["/zone/plugin"], str(tmp / "wisp"))
 
         self.assertEqual(held, [["cli"]])
+
+    def test_the_turn_leases_and_compression_locks_this_process_holds_are_released_before_it_becomes_the_supervisor(self):
+        spec = importlib.util.spec_from_file_location("wisp_sandbox_under_test", PLUGIN / "sandbox.py")
+        sandbox = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sandbox)
+        tmp = Path(tempfile.mkdtemp(prefix="wisp-hermes-live-"))
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "wisp").write_text(f"#!{sys.executable}\nimport sys\nif '--print-args' in sys.argv: sys.stdout.write('--\\0hermes')\n")
+        (tmp / "bwrap").write_text(f"#!{sys.executable}\nimport os, sys, time\n"
+                                   "os.write(int(sys.argv[2]), ('{\"child-pid\": %d}' % os.getpid()).encode())\ntime.sleep(30)\n")
+        for name in ("wisp", "bwrap"):
+            (tmp / name).chmod(0o755)
+        # As Hermes's `state.db`: the turn that ran `integrate`, still unexpired, and another process's.
+        later = time.time() + 300
+        mine, other = f"pid={os.getpid()}:pidns=1:turn=a", "pid=1:pidns=1:turn=b"
+        db = sqlite3.connect(tmp / "state.db")
+        db.executescript("CREATE TABLE session_turn_leases (conversation_id TEXT PRIMARY KEY, holder TEXT NOT NULL,"
+                         " acquired_at REAL NOT NULL, expires_at REAL NOT NULL);"
+                         "CREATE TABLE compression_locks (session_id TEXT PRIMARY KEY, holder TEXT NOT NULL,"
+                         " acquired_at REAL NOT NULL, expires_at REAL NOT NULL);")
+        for table in ("session_turn_leases", "compression_locks"):
+            db.executemany(f"INSERT INTO {table} VALUES (?, ?, 0, ?)", [("mine", mine, later), ("other", other, later),
+                                                                        (f"pid={os.getpid()}0", f"pid={os.getpid()}0", later)])
+        db.commit()
+        db.close()
+        held = []
+
+        def execve(*_):
+            with closing(sqlite3.connect(tmp / "state.db")) as db:
+                held.append({table: sorted(row[0] for row in db.execute(f"SELECT holder FROM {table}"))
+                             for table in ("session_turn_leases", "compression_locks")})
+            raise OSError("not in a test")
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp)}), patch.object(sys, "path", [str(FAKE), *sys.path]), \
+                patch.dict(sys.modules), patch.object(sandbox, "BWRAP", str(tmp / "bwrap")), \
+                patch.object(sandbox, "_inherited_fds", list), patch.object(sandbox.os, "execve", execve):
+            for name in [n for n in sys.modules if n == "hermes_state" or n.startswith("hermes_cli")]:
+                del sys.modules[name]
+            sandbox._reexec(["/zone/a"], ["/zone/plugin"], str(tmp / "wisp"))
+
+        kept = sorted([other, f"pid={os.getpid()}0"])
+        self.assertEqual(held, [{"session_turn_leases": kept, "compression_locks": kept}])
 
 
 class SandboxModule(unittest.TestCase):
