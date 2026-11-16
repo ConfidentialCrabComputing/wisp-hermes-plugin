@@ -183,6 +183,14 @@ def not_answering():
             "reached): tell the user so, and that Wisp is usually back within a minute; do not do the task another way.")
 
 
+def not_listed():
+    """What the hook refuses with while Wisp is connected and answers but Hermes has not connected it yet (a gateway
+    does at its next reconcile, a CLI chat at `/reload-mcp`): Wisp's tools are in no session's list, so nothing may
+    point to them."""
+    return ("Wisp is being connected to Hermes: tell the user so, and to try again in a moment (in a CLI chat, after "
+            "`/reload-mcp`); do not do the task another way.")
+
+
 def rejected(pinned):
     """What the hook refuses with, and the rule says, while Hermes has given up on the connected Wisp for good: Wisp
     refused its credential (revoked or replaced) or the address is wrong, and no retry mends either."""
