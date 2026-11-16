@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from .mcp_client import McpError, call_tool
+from .sandbox import in_the_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,9 @@ def _cache(zone, cache):
     try:
         cache.write_text(json.dumps(zone))
     except OSError as exc:
-        logger.warning("Wisp: could not cache the zone at %s: %s", cache, exc)
+        # The sandbox keeps the plugin read-only by design: the cache is written before it, and by `wisp integrate hermes`.
+        log = logger.debug if in_the_sandbox(str(cache.parent)) else logger.warning
+        log("Wisp: could not cache the zone at %s: %s", cache, exc)
 
 
 def load_zone(url, credential, cache, timeout=5.0):
