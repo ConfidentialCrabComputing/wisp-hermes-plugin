@@ -14,7 +14,7 @@ from .hook import make_hook
 from .mcp_client import call_tool, loopback, refuses
 from .sandbox import SERVICE_COMMAND, UNPROTECTED, protect
 from .zone import (PIN, ZONE_CACHE, down_rule, load_pin, load_zone, not_answering, not_connected, not_connected_rule,
-                   pinned_zone, rejected, routing_rule, SESSION_TIMEOUT, session_rule)
+                   not_listed, pinned_zone, rejected, routing_rule, SESSION_TIMEOUT, session_rule)
 
 logger = logging.getLogger(__name__)
 # The Hermes MCP servers `wisp integrate hermes` switched off because Wisp holds them now: written from
@@ -46,8 +46,9 @@ def register(ctx):
     ctx.register_cli_command(
         "wisp", "Connect Hermes to a Wisp Runtime", connect.setup, connect.handle,
         description="hermes wisp connect <url> registers the Runtime's MCP endpoint; --remove undoes it.")
-    # `unavailable` is bound below, before any command can run: what the hook refuses with, `/wisp` answers.
-    ctx.register_command("wisp", lambda raw_args: commands.wisp(ctx, raw_args, unavailable),
+    # `unreachable` and `unlisted` are bound below, before any command can run: what the hook refuses with, `/wisp`
+    # answers.
+    ctx.register_command("wisp", lambda raw_args: commands.wisp(ctx, raw_args, unreachable, unlisted),
                          description="Hand a task to Wisp directly", args_hint="[task]")
     # `[task]`, not `<task>`: Hermes leaves a plugin command whose hint starts with `<` out of Telegram's menu. Bare,
     # `/wisp` answers how to use it.
@@ -93,6 +94,8 @@ def register(ctx):
     routed = getattr(revival, "routed", None)
     if routed is None:
         routed = set()
+    # Whether Hermes has listed `ask_wisp` once in this process, kept on the same thread for the same reason.
+    listed = getattr(revival, "listed", None) or [False]
 
     def hermes_wisp():
         """Hermes's MCP client's view of `wisp`: None while it answers (or with no client loaded: only a Hermes that
@@ -171,9 +174,18 @@ def register(ctx):
                 logger.debug("Wisp: could not revive wisp: %r", exc)
             time.sleep(REVIVE_EVERY)
 
-    def unavailable():
-        """What the hook refuses with instead of `ask_wisp` while there is no Wisp to ask, else None."""
+    def unreachable():
+        """Why there is no Wisp to ask, else None."""
         return unconnected() or down()
+
+    def unlisted():
+        """The not-listed refusal while Hermes does not list `ask_wisp` yet, else None."""
+        return None if has_tools() else not_listed()
+
+    def unavailable():
+        """What the hook refuses with instead of `ask_wisp` while there is no Wisp to ask, or Hermes does not list
+        `ask_wisp` yet, else None."""
+        return unreachable() or unlisted()
 
     zone = pin = None
     live = False  # the pinned endpoint answered `wisp_zone` at this start, not the cache
@@ -252,14 +264,20 @@ def register(ctx):
     def has_tools():
         """Whether Hermes lists `ask_wisp` now: it connected `wisp`, or registered a lazy one's tools from its cache, or
         has no MCP client to say. A server configured since connects at a gateway's next reconcile, in a CLI only at
-        `/reload-mcp`. Unsure is not yet: a later turn asks again."""
+        `/reload-mcp`. Unsure is not yet: a later turn asks again. Once listed in this process, always: Hermes calls a
+        server it holds with no live session (a reconnect) "configured" too, and waits for the session at a call.
+        ponytail: a process that never asked while `wisp` was connected says "being connected" at its first reconnect;
+        a public "known to Hermes" signal would end that, if Hermes ever exposes one."""
+        if listed[0]:
+            return True
         try:
             discovery = sys.modules.get("tools.mcp_tool_discovery")
             if discovery is None:
                 return True
             entry = (read_raw_config().get("mcp_servers") or {}).get("wisp") or {}
-            return any(status.get("name") == "wisp" and status.get("status") in ("connected", "lazy")
-                       for status in discovery.get_mcp_status({"wisp": entry}))
+            listed[0] = any(status.get("name") == "wisp" and status.get("status") in ("connected", "lazy")
+                            for status in discovery.get_mcp_status({"wisp": entry}))
+            return listed[0]
         except Exception as exc:  # noqa: BLE001 — unsure is not yet
             logger.debug("Wisp: could not tell whether Hermes lists ask_wisp: %r", exc)
             return False
@@ -336,5 +354,6 @@ def register(ctx):
         revival = threading.Thread(target=revive, name="wisp-revive", daemon=True)
         revival.refusal = refusal
         revival.routed = routed
+        revival.listed = listed
         revival.start()
     revival.sealed = sealed
