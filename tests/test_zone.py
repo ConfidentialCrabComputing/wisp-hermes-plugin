@@ -580,6 +580,29 @@ print(json.dumps([before, told()[0]]))"""))
         self.assertEqual(self.refusal(FAKE_HERMES_WISP_STATUS="connected"), "This goes through Wisp — use ask_wisp.")
         self.assertIsNone(self.asked_wisp(FAKE_HERMES_WISP_STATUS="connected"))
 
+    def test_once_hermes_listed_ask_wisp_a_reconnect_does_not_block_it_even_after_a_reload(self):
+        # Hermes calls a server it holds with no live session "configured" too, and waits for the session at a call.
+        self.answers(ZONE)
+        (self.home / "plugins" / "wisp" / "zone.json").write_text(json.dumps(ZONE))
+        calls = [["mcp__wisp__ask_wisp", {"task": "How many unread emails do I have?"}],
+                 ["read_file", {"path": "/home/u/bank/a.csv"}]]
+        answers = json.loads(self.hermes("python", f"""import json, os
+calls = {calls!r}
+ctx = load_plugin()
+listed = [pre_tool_call(ctx, *call) for call in calls]
+os.environ["FAKE_HERMES_WISP_STATUS"] = "configured"
+reconnecting = [pre_tool_call(load_plugin(), *call) for call in calls]
+print(json.dumps([listed, reconnecting]))""", FAKE_HERMES_WISP_STATUS="connected"))
+
+        for answer in answers:
+            self.assertEqual(answer, [None, "This goes through Wisp — use ask_wisp."])
+
+    def test_a_lazy_wisp_counts_as_listed(self):
+        # Hermes registers a lazy server's tools from its cache.
+        self.answers(ZONE)
+
+        self.assertIsNone(self.asked_wisp(FAKE_HERMES_WISP_STATUS="lazy"))
+
     def test_wisp_parked_by_hermes_is_reconnected_soon_after_its_endpoint_answers_with_no_restart(self):
         # Hermes's own retry of a parked server comes every 300 s.
         self.answers(ZONE)
