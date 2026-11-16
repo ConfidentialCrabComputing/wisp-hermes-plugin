@@ -143,8 +143,8 @@ Runtime's `/mcp` and nothing else.
    ```
 
    The plugin is the repository's `wisp/` folder: Hermes clones and scans only that folder and installs it as `wisp`.
-   Its scanner shows a CAUTION verdict and its findings, then "Decision: BLOCKED" with "Use --force to override", then
-   asks "Install anyway? [y/N]": answer `y`. With no terminal it refuses; add `--force` there.
+   It warns that the source is custom (not from the Hermes catalog) and installs without a question. An older Hermes
+   whose scanner rates the plugin CAUTION asks "Install anyway? [y/N]": answer `y`, or with no terminal add `--force`.
 
 4. Connect it. `connect` asks for the Host Agent Credential and reads it without echo; then check the endpoint answers:
 
@@ -156,7 +156,8 @@ Runtime's `/mcp` and nothing else.
 5. If it connected only after a fix (Serve switched on, the Runtime restarted), Hermes gets Wisp back by itself within
    seconds, or at once with `hermes gateway restart`.
 
-Hermes's install-time scanner gives this plugin a `caution` verdict, with 14 findings, all in the plugin's own code:
+Hermes's install-time scanner gives this plugin a `safe` verdict, with 13 medium and low findings, all in the plugin's
+own code (`hermes plugins install` prints them only for a verdict that needs a decision):
 
 - `sandbox.py` starts processes: `wisp sandbox-exec` to build the sandbox, bubblewrap to start Hermes inside it, and
   `systemctl show` to tell whether a service manager restarts Hermes. It reads its own `/proc/self` (`mountinfo`,
