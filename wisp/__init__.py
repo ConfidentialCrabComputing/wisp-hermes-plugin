@@ -14,7 +14,7 @@ from .hook import make_hook
 from .mcp_client import call_tool, loopback, refuses
 from .sandbox import SERVICE_COMMAND, UNPROTECTED, protect
 from .zone import (PIN, ZONE_CACHE, down_rule, load_pin, load_zone, not_answering, not_connected, not_connected_rule,
-                   pinned_zone, rejected, routing_rule, SESSION_TIMEOUT, session_rule)
+                   not_listed, pinned_zone, rejected, routing_rule, SESSION_TIMEOUT, session_rule)
 
 logger = logging.getLogger(__name__)
 # The Hermes MCP servers `wisp integrate hermes` switched off because Wisp holds them now: written from
@@ -172,8 +172,9 @@ def register(ctx):
             time.sleep(REVIVE_EVERY)
 
     def unavailable():
-        """What the hook refuses with instead of `ask_wisp` while there is no Wisp to ask, else None."""
-        return unconnected() or down()
+        """What the hook refuses with instead of `ask_wisp` while there is no Wisp to ask, or Hermes does not list
+        `ask_wisp` yet, else None."""
+        return unconnected() or down() or (None if has_tools() else not_listed())
 
     zone = pin = None
     live = False  # the pinned endpoint answered `wisp_zone` at this start, not the cache

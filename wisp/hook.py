@@ -66,7 +66,8 @@ def make_hook(zone, config_path, moved=(), unavailable=lambda: None):
     """The hook for `zone` (None: only the switch-off attempts are refused); `config_path` is Hermes's
     `config.yaml`, whose `plugins` section enables this plugin; `moved` names Hermes's MCP servers
     switched off because Wisp holds them now; `unavailable()`, asked at each refusal, what to refuse with
-    instead of `ask_wisp` while there is no Wisp to ask (None while Wisp is connected and answers)."""
+    instead of `ask_wisp` while there is no Wisp to ask (None while Wisp is connected, answers and Hermes lists
+    `ask_wisp`)."""
     given = ([zone["dataDir"], zone["deskRoot"], *(f["path"] for f in zone.get("privateFolders") or []),
               *(zone.get("secretFiles") or [])] if zone else [])
     home = os.path.expanduser("~")
