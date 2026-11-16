@@ -144,6 +144,15 @@ class Commands(unittest.TestCase):
         self.assertIn("Wisp is being connected to Hermes", shown)
         self.assertNotIn("Unknown tool", shown)
 
+    def test_a_gateways_wisp_reaches_wisp_before_hermes_lists_its_tools(self):
+        # A gateway's `/wisp` goes through the plugin's own client, not Hermes's: Hermes's list does not matter to it.
+        calls = self.endpoint("done by wisp")
+
+        shown = self.hermes("message", "wisp", "pay the bill", FAKE_HERMES_WISP_STATUS="configured")
+
+        self.assertIn("done by wisp", shown)
+        self.assertIn("ask_wisp", [call["name"] for call in calls])
+
     def endpoint(self, answer, raw=None):
         """A fake Wisp MCP endpoint whose tools answer `answer`, or the body `raw` whole; returns the `tools/call`
         requests it got."""

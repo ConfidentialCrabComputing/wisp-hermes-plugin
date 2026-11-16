@@ -19,10 +19,11 @@ CHOICES = [{"value": "accept", "label": "Allow for this task"}, {"value": "decli
 _TAGS = re.compile("[\U000E0000-\U000E007F]")
 
 
-def wisp(ctx, raw_args, unavailable=lambda: None):
+def wisp(ctx, raw_args, unavailable=lambda: None, unlisted=lambda: None):
     """The task to `ask_wisp`, without Hermes's model; while the Run goes on, `wisp_result` until it ends.
     `unavailable()` says, as for the hook, why there is no Wisp to ask (None while there is): answered instead of
-    calling, since Hermes would answer a parked server's tool with "Unknown tool"."""
+    calling, since Hermes would answer a parked server's tool with "Unknown tool". `unlisted()` says so while Hermes does
+    not list `ask_wisp` yet, asked only where the task goes through Hermes's client."""
     task = (raw_args or "").strip()
     if not task:
         return "Usage: /wisp <task>"
@@ -31,6 +32,10 @@ def wisp(ctx, raw_args, unavailable=lambda: None):
         return why
     # ponytail: a Hermes without `ask_choice` keeps its own client everywhere, as before it could ask.
     if not hasattr(ctx, "ask_choice") or not hasattr(ctx, "session_surface") or ctx.session_surface() == "cli":
+        why = unlisted()
+        if why:
+            return why
+
         # Hermes's client, whose panel asks the CLI's Confirmations. Its names for the tools: `mcp__<server>__<tool>`.
         def call(tool, args):
             return json.loads(ctx.dispatch_tool(f"mcp__wisp__{tool}", args))
