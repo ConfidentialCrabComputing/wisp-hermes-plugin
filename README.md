@@ -223,6 +223,9 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
   restarts into the sandbox in place, and the turn that ran it is lost. Hermes pauses that chat until it is sent
   `/discard`; the chat needs no `/restart`, Telegram's command menu needs one to list `/wisp`. A chat opened in the 30
   seconds before stays locked until `/restart`.
+- On one machine, once `wisp integrate hermes` has run, Hermes cannot sign Wisp in: the sandbox hides `wisp login`.
+  Signing Wisp in again (a lost Account Login) takes a terminal on Wisp's machine, over ssh for a server. Run from
+  Hermes's own terminal before Wisp is signed in, `wisp integrate hermes` refuses and names the sign-in to do first.
 - On Windows the plugin is for connecting to a Wisp on another machine. A zone on the same Windows machine is not
   protected: there is no sandbox, and the check on Hermes's tool calls is untested there.
 - On a Windows Hermes, a Confirmation's answer that cannot be sent is reported only when Wisp's stream next speaks.
