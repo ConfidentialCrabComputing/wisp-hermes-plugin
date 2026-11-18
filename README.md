@@ -4,10 +4,25 @@ Hands the tasks that need Wisp's services or Private Folders from [Hermes](https
 to Wisp's `ask_wisp`, and registers `hermes wisp connect <url>`, `/wisp` and `/wisp-model` (`/wisp_model` in
 Telegram). It needs Hermes v0.21.6 or later.
 
-Hermes's own commands fill a Telegram bot's 60-slot command menu, so `hermes wisp connect` (which `wisp integrate
-hermes` runs) puts `/wisp` and `/wisp_model` first, ahead of any names already in the profile's
-`platforms.telegram.extra.command_menu.priority`; the gateway shows them from its next start. `--remove` takes them out
-again. Typed, both work whether the menu lists them or not, and `/commands` lists every command.
+The full guide: [Wisp inside Hermes](https://docs.usewisp.io/hermes) and
+[Set it up](https://docs.usewisp.io/hermes-setup).
+
+## Why use it
+
+Hermes keeps its keys in a plain-text `.env` its model can read, and sends whatever it reads to a cloud model. With this
+plugin, the private part goes to Wisp instead:
+
+- **Accounts whose keys should not sit in Hermes**: your Telegram account, Gmail, a bank or a broker behind an MCP
+  server. Wisp holds their keys in its encrypted store; Hermes never does.
+- **Folders a cloud model should not read**: statements and tax returns, medical records, contracts. Made Private
+  Folders, they are closed to Hermes and open to Wisp's private model.
+- **Answers, not records**: Hermes gets "412 € on restaurants in October", not the statement. That answer still reaches
+  Hermes's model; `/wisp <task>` shows it to you alone.
+- **A gate on what moves data out**: a prompt-injected Hermes still meets Wisp's Rules and Confirmations, though it can
+  approve them itself (see [Known limits](#known-limits)).
+
+Hermes keeps orchestrating: its skills, cron jobs and chats stay as they are, and every task it hands over is a Session
+in Wisp with its tool calls on record.
 
 ## One machine
 
@@ -34,9 +49,9 @@ goes nowhere.
    ```
 
 4. On Linux, bubblewrap is required for Wisp inside Hermes, not only for `bash_run`'s sandbox. When it is missing, or
-   Ubuntu's AppArmor blocks it, `integrate` prints the fix as "Before the restart: …": `sudo apt install bubblewrap`, or a
-   `sudo sh -c '…'` line that installs a bwrap AppArmor profile. Run it as printed; with no `sudo`, run it as root
-   without its leading `sudo`.
+   Ubuntu's AppArmor blocks it, `integrate` prints the fix as "Before the restart: …": `sudo apt install bubblewrap`, a
+   `sudo sh -c '…'` line that installs a bwrap AppArmor profile, or `sudo chmod u-s /usr/bin/bwrap` for a setuid
+   bubblewrap. Run it as printed; with no `sudo`, run it as root without its leading `sudo`.
 
 5. Restart Hermes, and quit any open `hermes` CLI:
 
@@ -45,6 +60,22 @@ goes nowhere.
    ```
 
    Until each Hermes has stopped, it runs without the sandbox.
+
+6. Tell Wisp what is private. Wisp's data directory and the Desk root are private already; add the accounts and folders
+   Hermes should reach only through Wisp, then restart Hermes, since the sandbox takes a new folder at Hermes's start:
+
+   ```sh
+   wisp connectors auth notion-remote     # an account, as a Wisp Connector
+   wisp private add ~/Documents/Finance   # a folder Hermes may not open
+   hermes gateway restart --all
+   ```
+
+   Wisp Desktop connected to this machine lists them in Settings → Knowledge → Private Folders. A removed folder stays
+   closed to Hermes until `wisp integrate hermes` runs again and Hermes restarts.
+
+To undo it all: `wisp integrate hermes --remove`, then `hermes gateway restart --all`. It disconnects every profile,
+switches the MCP servers it moved back on in Hermes (their Wisp Connectors stay), removes the plugin and revokes the
+`hermes` credential.
 
 Then:
 
@@ -184,6 +215,7 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
 - On one machine, the sandbox stops Hermes reading Wisp's zone itself, not a model set on escaping it: anything Hermes
   asks an unsandboxed process to run (an app it opens or scripts, a shell startup file or a tool on PATH it rewrites)
   runs outside the sandbox.
+- On macOS, Hermes's computer use can still open Private Folders: it drives apps the sandbox does not cover.
 - On one machine, the Runtime replaces its own agent token each time a sandboxed Hermes process starts, so a token
   Hermes's model saw before the sandbox stops working. A Hermes process still running unsandboxed (a CLI open since
   before `wisp integrate hermes`) can read the new token as well, until it stops.
@@ -215,6 +247,9 @@ Nothing of Wisp's is on Hermes's disk, so there is no sandbox and no `wisp docto
   unavailable in Hermes while `hermes mcp test wisp` succeeds, restart Hermes (`hermes gateway restart`). Under a
   gateway that serves several profiles, only the default profile is reconnected this way; the others wait for Hermes's
   own 5-minute retry.
+- Hermes's own commands fill a Telegram bot's 60-slot command menu, so `hermes wisp connect` puts `/wisp` and
+  `/wisp_model` first, ahead of any names already in the profile's `platforms.telegram.extra.command_menu.priority`;
+  `--remove` takes them out again. `/commands` lists every command.
 - In Telegram, `/wisp` and `/wisp_model` come first in the bot's command menu only after the gateway's next start:
   `hermes wisp connect` (and `wisp integrate hermes`) set the order, but a running gateway sent its menu when it
   started. Send `/restart` in the chat (or run `hermes gateway restart`), then close and reopen the chat: Telegram's
